@@ -9,10 +9,11 @@ from django.utils.dateparse import parse_datetime
 from django_celery_beat.models import PeriodicTask
 
 import app
-from app.models import MediaTypes, Sources, Status
+from app.models import MediaTypes, Sources, Status, ExternalID, MetadataSources
 from app.providers import services
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
+from integrations.models import UnresolvedImport
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,8 @@ class TraktImporter:
 
         # Track bulk creation lists for each media type
         self.bulk_media = defaultdict(list)
+        self.external_ids = []
+        self.unresolved_imports = []
 
         # Track media instances being created
         self.media_instances = defaultdict(lambda: defaultdict(list))
@@ -201,6 +204,9 @@ class TraktImporter:
 
         helpers.cleanup_existing_media(self.to_delete, self.user)
         helpers.bulk_create_media(self.bulk_media, self.user)
+
+        helpers.bulk_create_external_ids(self.external_ids)
+        helpers.bulk_create_unresolved(self.unresolved_imports)
 
         imported_counts = {
             media_type: len(media_list)
@@ -396,9 +402,11 @@ class TraktImporter:
 
         metadata = self._get_metadata(MediaTypes.MOVIE.value, tmdb_id, movie["title"])
         if not metadata:
+            self.queue_unresolved_media(MetadataSources.TRAKT, movie.get("ids", {}).get("trakt"), MediaTypes.MOVIE.value, entry,)
             return
 
         item = self._get_or_create_item(MediaTypes.MOVIE.value, tmdb_id, metadata)
+        self.queue_trakt_external_ids(movie.get("ids", {}), item)
         watched_at = entry["watched_at"]
 
         key = f"{tmdb_id}"
@@ -426,6 +434,7 @@ class TraktImporter:
     def process_watched_episode(self, entry):
         """Process a single episode watch event."""
         show = entry["show"]
+        episode = entry["episode"]
         tmdb_id = self._get_tmdb_id(show)
         if not tmdb_id:
             return
@@ -442,12 +451,13 @@ class TraktImporter:
             return
 
         # Extract episode data
-        season_number = entry["episode"]["season"]
-        episode_number = entry["episode"]["number"]
+        season_number = episode["season"]
+        episode_number = episode["number"]
 
         # Get TV metadata
         tv_metadata = self._get_metadata(MediaTypes.TV.value, tmdb_id, show["title"])
         if not tv_metadata:
+            self.queue_unresolved_media(MetadataSources.TRAKT, episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
             return
 
         # Get Season metadata
@@ -458,6 +468,7 @@ class TraktImporter:
             season_number,
         )
         if not season_metadata:
+            self.queue_unresolved_media(MetadataSources.TRAKT, episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
             return
 
         # Validate episode number exists in TMDB
@@ -471,6 +482,7 @@ class TraktImporter:
                 f"{item_identifier}: not found in {Sources.TMDB.label} "
                 f"with ID {tmdb_id}.",
             )
+            self.queue_unresolved_media(MetadataSources.TRAKT, episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
             return
 
         episode_image = self._get_episode_image(episode_number, season_metadata)
@@ -479,6 +491,7 @@ class TraktImporter:
         # Create or get TV show
         tv_item = self._get_or_create_item(MediaTypes.TV.value, tmdb_id, tv_metadata)
         tv_key = f"{tmdb_id}"
+        self.queue_trakt_external_ids(show.get("ids", {}), tv_item)
 
         if tv_key not in self.media_instances[MediaTypes.TV.value]:
             tv_obj = app.models.TV(
@@ -528,6 +541,7 @@ class TraktImporter:
         )
 
         ep_key = f"{tmdb_id}:{season_number}:{episode_number}"
+        self.queue_trakt_external_ids(episode.get("ids", {}), episode_item)
 
         episode_obj = app.models.Episode(
             item=episode_item,
@@ -763,3 +777,71 @@ class TraktImporter:
         for media_obj in self.media_instances[media_type][key]:
             for attr, value in defaults.items():
                 setattr(media_obj, attr, value)
+
+    def queue_trakt_external_ids(self, ids_dict, item):
+        """Queue ExternalID objects for bulk creation with error handling."""
+        valid_sources = {choice.value for choice in MetadataSources}
+
+        for source_key, source_id in ids_dict.items():
+            try:
+                if source_key not in valid_sources or not source_id:
+                    continue
+
+                # Convert source to enum safely
+                source_enum = MetadataSources(source_key)
+
+                self.external_ids.append(
+                    ExternalID(
+                        item=item,
+                        metadata_source=source_enum,
+                        metadata_source_identifier=str(source_id),
+                    )
+                )
+            except ValueError:
+                # Happens if source_key is not a valid Sources enum
+                logger.warning(
+                    "Skipping invalid external metadata source '%s' for item %s",
+                    source_key,
+                    getattr(item, "id", "<unknown>"),
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to queue external ID %s:%s for item %s: %s",
+                    source_key,
+                    source_id,
+                    getattr(item, "id", "<unknown>"),
+                    e,
+                )
+
+    def queue_unresolved_media(self, metadata_source, metadata_source_identifier, media_type, raw_entry):
+        """Queue unresolved media with error handling."""
+        if not metadata_source_identifier:
+            return
+
+        try:
+            # Convert source to enum if it isn't already
+            source_enum = metadata_source if isinstance(metadata_source, MetadataSources) else MetadataSources(metadata_source)
+
+            self.unresolved_imports.append(
+                UnresolvedImport(
+                    user=self.user,
+                    metadata_source=source_enum,
+                    metadata_source_identifier=str(metadata_source_identifier),
+                    media_type=media_type,
+                    raw_data=raw_entry,
+                )
+            )
+        except ValueError:
+            logger.warning(
+                "Skipping unresolved media with invalid source '%s' for user %s",
+                metadata_source,
+                getattr(self.user, "username", "<unknown>"),
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to queue unresolved media %s:%s for user %s: %s",
+                metadata_source,
+                metadata_source_identifier,
+                getattr(self.user, "username", "<unknown>"),
+                e,
+            )

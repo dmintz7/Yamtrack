@@ -7,7 +7,9 @@ from django.contrib.admin.sites import AlreadyRegistered
 from app.models import (
     Episode,
     Item,
+    ExternalID
 )
+from integrations.models import UnresolvedImport
 
 
 # Custom ModelAdmin classes with search functionality
@@ -85,6 +87,8 @@ SpecialModels = [
     "PodcastEpisode",
     "MetadataBackfillState",
     "CollectionEntry",
+    "ExternalID",
+    "UnresolvedImport"
 ]
 for model in app_models:
     if (
@@ -189,3 +193,14 @@ class CollectionEntryAdmin(admin.ModelAdmin):
 from app.models import CollectionEntry  # noqa: E402
 
 admin.site.register(CollectionEntry, CollectionEntryAdmin)
+
+@admin.register(ExternalID)
+class ExternalIDAdmin(admin.ModelAdmin):
+    list_display = ["item", "metadata_source", "metadata_source_identifier", "created_at"]
+    search_fields = ["metadata_source", "metadata_source_identifier", "item__title"]
+
+
+@admin.register(UnresolvedImport)
+class UnresolvedImporterAdmin(admin.ModelAdmin):
+    list_display = ["user", "media_type", "metadata_source", "metadata_source_identifier", "found_metadata_source", "found_metadata_source_identifier"]
+    search_fields = ["media_type", "metadata_source", "metadata_source_identifier"]
