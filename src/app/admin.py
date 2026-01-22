@@ -86,7 +86,10 @@ SpecialModels = [
     "PodcastShow",
     "PodcastEpisode",
     "MetadataBackfillState",
+<<<<<<< HEAD
     "CollectionEntry",
+=======
+>>>>>>> 23090331 (Create models ExternalId and UnresolvedImport)
     "ExternalID",
     "UnresolvedImport"
 ]
@@ -178,7 +181,6 @@ from app.models import PodcastEpisode, PodcastShow  # noqa: E402
 admin.site.register(PodcastShow, PodcastShowAdmin)
 admin.site.register(PodcastEpisode, PodcastEpisodeAdmin)
 
-
 class CollectionEntryAdmin(admin.ModelAdmin):
     """Admin for CollectionEntry model."""
 
@@ -194,13 +196,12 @@ from app.models import CollectionEntry  # noqa: E402
 
 admin.site.register(CollectionEntry, CollectionEntryAdmin)
 
-@admin.register(ExternalID)
-class ExternalIDAdmin(admin.ModelAdmin):
-    list_display = ["item", "metadata_source", "metadata_source_identifier", "created_at"]
-    search_fields = ["metadata_source", "metadata_source_identifier", "item__title"]
 
-
-@admin.register(UnresolvedImport)
-class UnresolvedImporterAdmin(admin.ModelAdmin):
+class UnresolvedImportAdmin(admin.ModelAdmin):
     list_display = ["user", "media_type", "metadata_source", "metadata_source_identifier", "found_metadata_source", "found_metadata_source_identifier"]
     search_fields = ["media_type", "metadata_source", "metadata_source_identifier"]
+
+# Register CollectionEntry with custom admin class
+from integrations.models import UnresolvedImport  # noqa: E402
+
+admin.site.register(UnresolvedImport, UnresolvedImportAdmin)

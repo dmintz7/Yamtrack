@@ -3223,21 +3223,3 @@ class CollectionEntry(models.Model):
     def __str__(self):
         return f"{self.user.username} - {self.item.title}"
     
-class ExternalID(models.Model):
-    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="external_ids")
-    metadata_source = models.CharField(max_length=20, choices=MetadataSources.choices)
-    metadata_source_identifier = models.CharField(max_length=128)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [
-            # Enforce unique (item + source)
-            models.UniqueConstraint(fields=["item", "metadata_source"], name="uniq_item_metadata_source"),
-
-            # Enforce valid source values
-            models.CheckConstraint(
-                check=Q(metadata_source__in=[s.value for s in MetadataSources]),
-                name="externalid_valid_metadata_source",
-            ),
-        ]
