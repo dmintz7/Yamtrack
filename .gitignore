@@ -21,3 +21,4 @@ db-dev/
 
 # Local dev DB
 db/
+.idea/
