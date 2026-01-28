@@ -2,7 +2,7 @@ name: Sync pristine from upstream release
 
 on:
   schedule:
-    - cron: "0 * * * *"   # ever  y hour (adjust as needed)
+    - cron: "10 * * * *"   # ever  y hour (adjust as needed)
   workflow_dispatch:
 
 jobs:
