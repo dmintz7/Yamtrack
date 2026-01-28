@@ -22,3 +22,4 @@ db-dev/
 # Local dev DB
 db/
 .idea/
+.DS_Store
