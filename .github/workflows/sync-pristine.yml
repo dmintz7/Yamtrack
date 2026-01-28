@@ -1,0 +1,31 @@
+name: Sync pristine from upstream release
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # ever  y hour (adjust as needed)
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout mirror repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream repo
+        run: |
+          git remote add upstream https://github.com/dannyvfilms/Yamtrack.git
+          git fetch upstream
+
+      - name: Reset pristine to upstream release
+        run: |
+          git checkout pristine || git checkout -b pristine
+          git reset --hard upstream/release
+          git clean -fd
+
+      - name: Force push pristine
+        run: |
+          git push origin pristine --force-with-lease
