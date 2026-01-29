@@ -236,7 +236,7 @@ class ListDetailViewTests(TestCase):
         mock_update_preference,
     ):
         """Test the list_detail view."""
-        mock_update_preference.return_value = "date_added"
+        mock_update_preference.side_effect = ["date_added", None]
         mock_user_can_view.return_value = True
 
         # Create Movie instance
@@ -279,7 +279,7 @@ class ListDetailViewTests(TestCase):
         mock_update_preference,
     ):
         """Test the list_detail view when user is not authorized."""
-        mock_update_preference.return_value = "date_added"
+        mock_update_preference.side_effect = ["date_added", None]
         mock_user_can_view.return_value = False
 
         response = self.client.get(reverse("list_detail", args=[self.custom_list.id]))
@@ -293,7 +293,7 @@ class ListDetailViewTests(TestCase):
         mock_update_preference,
     ):
         """Test the list_detail view with media type filter."""
-        mock_update_preference.return_value = "date_added"
+        mock_update_preference.side_effect = ["date_added", None]
         mock_user_can_view.return_value = True
 
         # Create model instances
@@ -331,13 +331,62 @@ class ListDetailViewTests(TestCase):
 
     @patch.object(get_user_model(), "update_preference")
     @patch.object(CustomList, "user_can_view")
+    def test_list_detail_view_filter_by_status(
+        self,
+        mock_user_can_view,
+        mock_update_preference,
+    ):
+        """Test the list_detail view with status filter."""
+        mock_update_preference.side_effect = ["date_added", Status.PLANNING.value]
+        mock_user_can_view.return_value = True
+
+        # Create model instances
+        Movie.objects.create(
+            item=self.movie_item,
+            status=Status.COMPLETED.value,
+            user=self.user,
+        )
+
+        TV.objects.create(
+            item=self.tv_item,
+            status=Status.IN_PROGRESS.value,
+            user=self.user,
+        )
+
+        Anime.objects.create(
+            item=self.anime_item,
+            status=Status.PLANNING.value,
+            user=self.user,
+        )
+
+        # Test the view with status filter
+        response = self.client.get(
+            reverse("list_detail", args=[self.custom_list.id])
+            + f"?status={Status.PLANNING.value}",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # Check that filters are applied
+        self.assertEqual(
+            response.context["current_status"],
+            Status.PLANNING.value,
+        )
+        # Should only have the PLANNING item of media type ANIME
+        self.assertEqual(len(response.context["items"]), 1)
+        self.assertEqual(
+            response.context["items"][0].media_type,
+            MediaTypes.ANIME.value,
+        )
+
+    @patch.object(get_user_model(), "update_preference")
+    @patch.object(CustomList, "user_can_view")
     def test_list_detail_view_search(
         self,
         mock_user_can_view,
         mock_update_preference,
     ):
         """Test the list_detail view with search filter."""
-        mock_update_preference.return_value = "date_added"
+        mock_update_preference.side_effect = ["date_added", None]
         mock_user_can_view.return_value = True
 
         # Create model instances
@@ -399,7 +448,7 @@ class ListDetailViewTests(TestCase):
         )
 
         # Test title sorting
-        mock_update_preference.return_value = "title"
+        mock_update_preference.side_effect = ["title", None]
         response = self.client.get(
             reverse("list_detail", args=[self.custom_list.id]) + "?sort=title",
         )
@@ -407,7 +456,7 @@ class ListDetailViewTests(TestCase):
         self.assertEqual(response.context["current_sort"], "title")
 
         # Test media_type sorting
-        mock_update_preference.return_value = "media_type"
+        mock_update_preference.side_effect = ["media_type", None]
         response = self.client.get(
             reverse("list_detail", args=[self.custom_list.id]) + "?sort=media_type",
         )
@@ -513,7 +562,7 @@ class ListDetailViewTests(TestCase):
         mock_update_preference,
     ):
         """Test the list_detail view with HTMX request."""
-        mock_update_preference.return_value = "date_added"
+        mock_update_preference.side_effect = ["date_added", None]
         mock_user_can_view.return_value = True
 
         # Create model instances
@@ -952,3 +1001,47 @@ class ListItemToggleTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["has_item"])  # Item was removed
+
+
+class ListRssFeedTests(TestCase):
+    """Tests for the public list RSS feed."""
+
+    def setUp(self):
+        """Set up test data."""
+        self.user = get_user_model().objects.create_user(
+            username="rssuser",
+            password="testpassword",
+        )
+        self.custom_list = CustomList.objects.create(
+            name="Public RSS List",
+            description="Test RSS list",
+            owner=self.user,
+            visibility="public",
+        )
+        self.movie_item = Item.objects.create(
+            media_id="rss-1",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="RSS Movie",
+        )
+        CustomListItem.objects.create(
+            custom_list=self.custom_list,
+            item=self.movie_item,
+        )
+
+    def test_public_list_rss_feed(self):
+        """Return RSS feed for a public list."""
+        response = self.client.get(reverse("list_rss", args=[self.custom_list.id]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"rss", response.content)
+        self.assertIn(b"RSS Movie", response.content)
+
+    def test_private_list_rss_feed_returns_404(self):
+        """Return 404 for private lists."""
+        self.custom_list.visibility = "private"
+        self.custom_list.save(update_fields=["visibility"])
+
+        response = self.client.get(reverse("list_rss", args=[self.custom_list.id]))
+
+        self.assertEqual(response.status_code, 404)

@@ -154,6 +154,13 @@ class MobileGridLayoutChoices(models.TextChoices):
     COMPACT = "compact", "Compact (3 columns)"
 
 
+class MediaCardSubtitleDisplayChoices(models.TextChoices):
+    """Choices for media card subtitle visibility."""
+
+    HOVER = "hover", "On hover"
+    ALWAYS = "always", "Always visible"
+
+
 class PlannedHomeDisplayChoices(models.TextChoices):
     """Choices for how planned items are displayed on home page."""
 
@@ -167,6 +174,14 @@ class JellyseerrDefaultAddedStatusChoices(models.TextChoices):
 
     PLANNING = Status.PLANNING.value, Status.PLANNING.label
     IN_PROGRESS = Status.IN_PROGRESS.value, Status.IN_PROGRESS.label
+
+
+class QuickWatchDateChoices(models.TextChoices):
+    """Choices for quick watch date behavior when bulk-marking media as completed."""
+
+    CURRENT_DATE = "current_date", "Current Date"
+    RELEASE_DATE = "release_date", "Release Date"
+    NO_DATE = "no_date", "No Date"
 
 
 class User(AbstractUser):
@@ -439,12 +454,55 @@ class User(AbstractUser):
         choices=MediaStatusChoices.choices,
     )
 
+    # Media type preferences: Board Games
+    boardgame_enabled = models.BooleanField(default=True)
+    boardgame_layout = models.CharField(
+        max_length=20,
+        default=LayoutChoices.GRID,
+        choices=LayoutChoices.choices,
+    )
+    boardgame_sort = models.CharField(
+        max_length=20,
+        default=MediaSortChoices.SCORE,
+        choices=MediaSortChoices.choices,
+    )
+    boardgame_status = models.CharField(
+        max_length=20,
+        default=MediaStatusChoices.ALL,
+        choices=MediaStatusChoices.choices,
+    )
+
     # UI preferences
     clickable_media_cards = models.BooleanField(
         default=False,
         help_text="Hide hover overlay on touch devices",
     )
+    media_card_subtitle_display = models.CharField(
+        max_length=20,
+        default=MediaCardSubtitleDisplayChoices.HOVER,
+        choices=MediaCardSubtitleDisplayChoices.choices,
+        help_text="Control when media card subtitles are visible",
+    )
 
+    # Tracking settings
+    quick_watch_date = models.CharField(
+        max_length=20,
+        default=QuickWatchDateChoices.CURRENT_DATE,
+        choices=QuickWatchDateChoices.choices,
+        help_text="Date to use when bulk-marking media as completed",
+    )
+    date_format = models.CharField(
+        max_length=20,
+        default=DateFormatChoices.ISO_8601,
+        choices=DateFormatChoices.choices,
+        help_text="Preferred date display format",
+    )
+    time_format = models.CharField(
+        max_length=20,
+        default=TimeFormatChoices.HH_MM,
+        choices=TimeFormatChoices.choices,
+        help_text="Preferred time display format",
+    )
     # Calendar preferences
     calendar_layout = models.CharField(
         max_length=20,
@@ -462,6 +520,11 @@ class User(AbstractUser):
         max_length=20,
         default=ListDetailSortChoices.DATE_ADDED,
         choices=ListDetailSortChoices.choices,
+    )
+    list_detail_status = models.CharField(
+        max_length=20,
+        default=MediaStatusChoices.ALL,
+        choices=MediaStatusChoices.choices,
     )
 
     # Notification settings
@@ -713,12 +776,20 @@ class User(AbstractUser):
                 condition=models.Q(activity_history_view__in=ActivityHistoryViewChoices.values),
             ),
             models.CheckConstraint(
+                name="media_card_subtitle_display_valid",
+                condition=models.Q(media_card_subtitle_display__in=MediaCardSubtitleDisplayChoices.values),
+            ),
+            models.CheckConstraint(
                 name="statistics_default_range_valid",
                 condition=models.Q(statistics_default_range__in=StatisticsRangeChoices.values),
             ),
             models.CheckConstraint(
                 name="list_detail_sort_valid",
                 condition=models.Q(list_detail_sort__in=ListDetailSortChoices.values),
+            ),
+            models.CheckConstraint(
+                name="list_detail_status_valid",
+                condition=models.Q(list_detail_status__in=MediaStatusChoices.values),
             ),
             models.CheckConstraint(
                 name="tv_status_valid",
@@ -780,6 +851,10 @@ class User(AbstractUser):
                 name="podcast_status_valid",
                 condition=models.Q(podcast_status__in=MediaStatusChoices.values),
             ),
+            models.CheckConstraint(
+                name="quick_watch_date_valid",
+                condition=models.Q(quick_watch_date__in=QuickWatchDateChoices.values),
+            ),
         ]
 
     def update_preference(self, field_name, new_value):
@@ -820,6 +895,26 @@ class User(AbstractUser):
             self.save(update_fields=[field_name])
 
         return new_value
+
+    def resolve_watch_date(self, now, release_date):
+        """
+        Resolve the appropriate watch date based on user preference.
+
+        Args:
+            now: Pre-calculated current datetime
+            release_date: The release/air date for the specific media item
+
+        Returns:
+            datetime or None based on user preference
+        """
+        if self.quick_watch_date == QuickWatchDateChoices.NO_DATE:
+            return None
+
+        if self.quick_watch_date == QuickWatchDateChoices.RELEASE_DATE:
+            return release_date  # Will be None if not available in metadata
+
+        # CURRENT_DATE is the default
+        return now
 
     def get_enabled_media_types(self):
         """Return a list of enabled media type values based on user preferences."""

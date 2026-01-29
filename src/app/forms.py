@@ -268,7 +268,7 @@ class MangaForm(MediaForm):
         user = kwargs.pop("user", None)
         max_progress = kwargs.pop("max_progress", None)
         super().__init__(*args, **kwargs)
-        
+
         # Adjust progress field for percentage mode
         if user and user.book_comic_manga_progress_percentage:
             self.fields["progress"].label = "Progress (%)"
@@ -354,7 +354,7 @@ class BookForm(MediaForm):
         user = kwargs.pop("user", None)
         max_progress = kwargs.pop("max_progress", None)
         super().__init__(*args, **kwargs)
-        
+
         # Adjust progress field for percentage mode
         if user and user.book_comic_manga_progress_percentage:
             self.fields["progress"].label = "Progress (%)"
@@ -385,7 +385,7 @@ class ComicForm(MediaForm):
         user = kwargs.pop("user", None)
         max_progress = kwargs.pop("max_progress", None)
         super().__init__(*args, **kwargs)
-        
+
         # Adjust progress field for percentage mode
         if user and user.book_comic_manga_progress_percentage:
             self.fields["progress"].label = "Progress (%)"
@@ -395,6 +395,21 @@ class ComicForm(MediaForm):
                 "step": 0.1,
                 "placeholder": "%"
             })
+
+
+class BoardgameForm(MediaForm):
+    """Form for board games."""
+
+    class Meta(MediaForm.Meta):
+        """Bind form to model."""
+
+        model = BoardGame
+        labels = {
+            "progress": (
+                "Progress "
+                f"({config.get_unit(MediaTypes.BOARDGAME.value, short=False)}s)"
+            ),
+        }
 
 
 class TvForm(MediaForm):

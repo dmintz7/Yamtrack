@@ -3,7 +3,7 @@
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
-from app.models import MediaTypes, MetadataSources, Item
+from app.models import MediaTypes, Item
 
 
 class PlexAccount(models.Model):
@@ -225,7 +225,7 @@ class TraktAccount(models.Model):
 
 class UnresolvedImport(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="unresolved_media",)
-    metadata_source = models.CharField(max_length=20, choices=MetadataSources.choices)
+    metadata_source = models.CharField(max_length=20)
     metadata_source_identifier = models.CharField(max_length=128)
     media_type = models.CharField(max_length=20, choices=MediaTypes.choices)
     raw_data = models.JSONField(null=True, blank=True)

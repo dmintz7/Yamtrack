@@ -24,8 +24,10 @@ from users.models import (
     ActivityHistoryViewChoices,
     DateFormatChoices,
     GameLoggingStyleChoices,
+    MediaCardSubtitleDisplayChoices,
     MobileGridLayoutChoices,
     PlannedHomeDisplayChoices,
+    QuickWatchDateChoices,
     TimeFormatChoices,
 )
 
@@ -294,40 +296,53 @@ def test_notification(request):
 
 
 @require_http_methods(["GET", "POST"])
+def sidebar(request):
+    """Render the sidebar settings page (media types visibility and UI preferences)."""
+    # Get all media types except episode
+    media_types = [mt.value for mt in MediaTypes if mt.value != MediaTypes.EPISODE.value]
+    
+    if request.method == "POST":
+        # Prevent demo users from updating preferences
+        if request.user.is_demo:
+            messages.error(request, "This section is view-only for demo accounts.")
+            return redirect("sidebar")
+        
+        fields_to_update = []
+        
+        # Handle clickable_media_cards preference
+        clickable_media_cards = request.POST.get("clickable_media_cards") == "on"
+        if request.user.clickable_media_cards != clickable_media_cards:
+            request.user.clickable_media_cards = clickable_media_cards
+            fields_to_update.append("clickable_media_cards")
+        
+        # Handle media types checkboxes
+        selected_media_types = request.POST.getlist("media_types_checkboxes")
+        for media_type in media_types:
+            enabled_field = f"{media_type}_enabled"
+            is_enabled = media_type in selected_media_types
+            current_value = getattr(request.user, enabled_field, False)
+            if current_value != is_enabled:
+                setattr(request.user, enabled_field, is_enabled)
+                fields_to_update.append(enabled_field)
+        
+        if fields_to_update:
+            request.user.save(update_fields=fields_to_update)
+            messages.success(request, "Settings updated successfully.")
+        else:
+            messages.info(request, "No changes to save.")
+        
+        return redirect("sidebar")
+    
+    context = {
+        "media_types": media_types,
+    }
+    return render(request, "users/sidebar.html", context)
+
+
+@require_GET
 def ui_preferences(request):
-    """Render the UI preferences settings page."""
-    media_types = MediaTypes.values
-    media_types.remove(MediaTypes.EPISODE.value)
-
-    if request.method == "GET":
-        return render(
-            request,
-            "users/ui_preferences.html",
-            {"media_types": media_types},
-        )
-
-    # Prevent demo users from updating preferences
-    if request.user.is_demo:
-        messages.error(request, "This section is view-only for demo accounts.")
-        return redirect("ui_preferences")
-
-    # Process form submission
-    request.user.clickable_media_cards = "clickable_media_cards" in request.POST
-    media_types_checked = request.POST.getlist("media_types_checkboxes")
-
-    # Update user preferences for each media type
-    for media_type in media_types:
-        setattr(
-            request.user,
-            f"{media_type}_enabled",
-            media_type in media_types_checked,
-        )
-
-    # Save changes and redirect
-    request.user.save()
-    messages.success(request, "Settings updated.")
-
-    return redirect("ui_preferences")
+    """Redirect to sidebar page (UI preferences renamed to Sidebar)."""
+    return redirect("sidebar")
 
 
 @require_http_methods(["GET", "POST"])
@@ -354,6 +369,7 @@ def preferences(request):
         activity_history_view = request.POST.get("activity_history_view")
         game_logging_style = request.POST.get("game_logging_style")
         mobile_grid_layout = request.POST.get("mobile_grid_layout")
+        media_card_subtitle_display = request.POST.get("media_card_subtitle_display")
         quick_season_update_mobile = request.POST.get("quick_season_update_mobile") == "1"
         book_comic_manga_progress_percentage = request.POST.get("book_comic_manga_progress_percentage") == "1"
 
@@ -396,6 +412,15 @@ def preferences(request):
             if request.user.mobile_grid_layout != mobile_grid_layout:
                 request.user.mobile_grid_layout = mobile_grid_layout
                 fields_to_update.append("mobile_grid_layout")
+
+        if (
+            media_card_subtitle_display
+            and media_card_subtitle_display
+            in [choice[0] for choice in MediaCardSubtitleDisplayChoices.choices]
+        ):
+            if request.user.media_card_subtitle_display != media_card_subtitle_display:
+                request.user.media_card_subtitle_display = media_card_subtitle_display
+                fields_to_update.append("media_card_subtitle_display")
 
         if request.user.quick_season_update_mobile != quick_season_update_mobile:
             request.user.quick_season_update_mobile = quick_season_update_mobile

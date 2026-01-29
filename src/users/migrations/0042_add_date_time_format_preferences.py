@@ -10,6 +10,14 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RemoveField(
+            model_name='user',
+            name='date_format',
+        ),
+        migrations.RemoveField(
+            model_name='user',
+            name='time_format',
+        ),
         migrations.AddField(
             model_name='user',
             name='date_format',
