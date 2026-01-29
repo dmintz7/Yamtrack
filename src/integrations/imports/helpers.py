@@ -17,6 +17,7 @@ from simple_history.utils import bulk_create_with_history
 
 import app
 from app.models import MediaTypes
+from integrations.models import UnresolvedImport
 
 logger = logging.getLogger(__name__)
 
@@ -341,3 +342,106 @@ def encrypt(value):
 def decrypt(token):
     """Decrypt value that was encrypted with `encrypt`."""
     return fernet().decrypt(token.encode()).decode()
+
+
+def bulk_create_unresolved(unresolved, batch_size=500):
+    """Bulk create UnresolvedImport objects with deduplication."""
+    if not unresolved:
+        return
+
+    seen = set()
+    unique_unresolved = []
+    for entry in unresolved:
+        key = (entry.user_id, entry.metadata_source.value, entry.metadata_source_identifier, entry.media_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_unresolved.append(entry)
+
+    retry_on_lock(
+        lambda: UnresolvedImport.objects.bulk_create(
+            unique_unresolved,
+            batch_size=batch_size,
+            ignore_conflicts=True,
+        )
+    )
+
+
+def initiate_unresolved_import(user):
+    unresolved_entries = UnresolvedImport.objects.filter(user=user, found_metadata_source__isnull=False, found_metadata_source_identifier__isnull=False)
+    logger.info("Found %d unresolved entries for user %s", unresolved_entries.count(), user.username)
+
+    warnings = []
+    import_counts = {}  # flat counts per media type
+
+    for unresolved in unresolved_entries:
+        data = unresolved.raw_data
+        media_type = unresolved.media_type
+        found_metadata_source = unresolved.found_metadata_source
+        found_metadata_source_identifier = unresolved.found_metadata_source_identifier
+
+        # Initialize count for this media type
+        import_counts.setdefault(media_type, 0)
+
+        # Fix source ID mapping
+        if media_type == MediaTypes.MOVIE.value:
+            data.setdefault("movie", {}).setdefault("ids", {})[found_metadata_source] = str(found_metadata_source_identifier)
+        elif media_type == MediaTypes.TV.value:
+            data.setdefault("show", {}).setdefault("ids", {})[found_metadata_source] = str(found_metadata_source_identifier)
+        elif media_type == MediaTypes.EPISODE.value:
+            data.setdefault("episode", {}).setdefault("ids", {})[found_metadata_source] = str(found_metadata_source_identifier)
+        else:
+            warnings.append(f"Unrecognized media type for unresolved import: {unresolved}")
+            continue
+
+        try:
+            if process_unresolved_import_entry(media_type, user, unresolved.metadata_source, data, found_metadata_source):
+                unresolved.delete()
+                import_counts[media_type] += 1  # flat count for successful imports
+                logger.info("Successfully processed unresolved media: %s", unresolved)
+            else:
+                warnings.append(f"Failed to process unresolved media: {unresolved}")
+        except Exception as e:
+            warnings.append(f"Error processing {unresolved}: {e}")
+            logger.exception("Failed to reprocess %s", unresolved)
+
+    return import_counts, warnings
+
+
+def process_unresolved_import_entry(media_type, user, source, data, matched_source):
+    from integrations.imports.trakt import TraktImporter
+    """
+    Dispatches unresolved media to the appropriate importer.
+    Returns True if successfully processed.
+    """
+    importers = {
+       "trakt": TraktImporter,
+    }
+
+    if source not in importers:
+        logger.error("No importer available for source: %s", source)
+        return False
+
+    importer_class = importers[source]
+    importer = importer_class(user, user, mode="all")
+
+    try:
+        if source == "trakt":
+            if media_type == MediaTypes.MOVIE.value:
+                importer.process_watched_movie(data)
+            elif media_type in (MediaTypes.TV.value, MediaTypes.EPISODE.value):
+                logger.info((data, matched_source))
+                importer.process_watched_episode(data)
+            else:
+                return False
+        else:
+            return False
+        if importer.bulk_media:
+            bulk_create_media(importer.bulk_media, user)
+            importer.bulk_media = defaultdict(list)
+            return True
+        else:
+            return False
+    except Exception as e:
+        logger.exception("Error processing media via importer %s: %s", importer_class.__name__, e)
+        return False

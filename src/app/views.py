@@ -10,6 +10,7 @@ from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_not_required, login_required
+from django.contrib.auth.decorators import login_not_required, login_required
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.paginator import EmptyPage, Paginator
@@ -45,11 +46,18 @@ from app.forms import (
     ManualItemForm,
     get_form_class,
 )
+from app.forms import (
+    CollectionEntryForm,
+    EpisodeForm,
+    ManualItemForm,
+    get_form_class,
+)
 from app.models import (
     TV,
     Album,
     Artist,
     BasicMedia,
+    CollectionEntry,
     CollectionEntry,
     Item,
     MediaTypes,
@@ -70,6 +78,7 @@ logger = logging.getLogger(__name__)
 MEDIA_RATING_CHOICES = (
     ("all", "All"),
     ("rated", "Rated"),
+    # "not_rated" is handled in logic but not shown in dropdown (toggle behavior)
     # "not_rated" is handled in logic but not shown in dropdown (toggle behavior)
 )
 RECENTLY_NOT_RATED_KEY = "recently_not_rated"
@@ -475,7 +484,16 @@ def media_list(request, media_type):
     # Allow "not_rated" even though it's not in display choices (toggle behavior)
     valid_rating_filters = {"all", "rated", "not_rated"}
     if rating_filter not in valid_rating_filters:
+    # Allow "not_rated" even though it's not in display choices (toggle behavior)
+    valid_rating_filters = {"all", "rated", "not_rated"}
+    if rating_filter not in valid_rating_filters:
         rating_filter = "all"
+    
+    collection_filter = request.GET.get("collection", "all")
+    valid_collection_filters = {"all", "collected", "not_collected"}
+    if collection_filter not in valid_collection_filters:
+        collection_filter = "all"
+    
     
     collection_filter = request.GET.get("collection", "all")
     valid_collection_filters = {"all", "collected", "not_collected"}
@@ -540,6 +558,43 @@ def media_list(request, media_type):
                 filtered_items.append(media)
         
         return filtered_items
+    
+    def apply_collection_filter(media_items, filter_value, user, media_type):
+        """Filter media items based on collection status.
+        
+        For TV shows, checks both show-level and episode-level collection entries.
+        """
+        if filter_value == "all":
+            return media_items
+        
+        from app.models import Item, CollectionEntry, MediaTypes
+        
+        filtered_items = []
+        for media in media_items:
+            # Check show/item-level collection entry
+            has_collection = helpers.is_item_collected(user, media.item) is not None
+            
+            # For TV shows, also check episode-level collection entries
+            if not has_collection and media_type in (MediaTypes.TV.value, MediaTypes.ANIME.value):
+                episode_items = Item.objects.filter(
+                    media_id=media.item.media_id,
+                    source=media.item.source,
+                    media_type=MediaTypes.EPISODE.value
+                )
+                if episode_items.exists():
+                    has_episode_collection = CollectionEntry.objects.filter(
+                        user=user,
+                        item__in=episode_items
+                    ).exists()
+                    has_collection = has_episode_collection
+            
+            # Apply filter
+            if filter_value == "collected" and has_collection:
+                filtered_items.append(media)
+            elif filter_value == "not_collected" and not has_collection:
+                filtered_items.append(media)
+        
+        return filtered_items
 
     # Get media list with filters applied
     media_queryset = BasicMedia.objects.get_media_list(
@@ -550,6 +605,11 @@ def media_list(request, media_type):
         search=search_query,
         direction=direction,
     )
+    
+    # Convert to list for filtering (rating and collection filters work on lists)
+    media_list = list(media_queryset)
+    media_list = apply_rating_filter(media_list, rating_filter)
+    media_list = apply_collection_filter(media_list, collection_filter, request.user, media_type)
     
     # Convert to list for filtering (rating and collection filters work on lists)
     media_list = list(media_queryset)
@@ -573,6 +633,7 @@ def media_list(request, media_type):
             direction,
             rating_filter,
             collection_filter,
+            collection_filter,
         )
         cached_results = cache.get(cache_key)
 
@@ -582,6 +643,8 @@ def media_list(request, media_type):
         else:
             logger.debug(f"DEBUG: Starting time_left sort for page {page} (no cache)")
 
+            # media_list already has filters applied from above
+            logger.debug(f"DEBUG: Got {len(media_list)} media objects after filtering")
             # media_list already has filters applied from above
             logger.debug(f"DEBUG: Got {len(media_list)} media objects after filtering")
 
@@ -618,6 +681,7 @@ def media_list(request, media_type):
     else:
         # Paginate results normally
         items_per_page = 32
+        paginator = Paginator(media_list, items_per_page)
         paginator = Paginator(media_list, items_per_page)
         media_page = paginator.get_page(page)
 
@@ -1805,6 +1869,10 @@ def media_details(
         "collection_stats": collection_stats,
         "fetching_collection_data": fetching_collection_data if not public_view else False,
         "item_id_for_polling": item_id_for_polling if not public_view else None,
+        "collection_entry": collection_entry,
+        "collection_stats": collection_stats,
+        "fetching_collection_data": fetching_collection_data if not public_view else False,
+        "item_id_for_polling": item_id_for_polling if not public_view else None,
     }
     return render(request, "app/media_details.html", context)
 
@@ -1997,6 +2065,38 @@ def season_details(
             episode_number = episode.get("episode_number")
             episode["collection_entry"] = collection_entries.get(episode_number)
 
+    # Add collection_entry data to each episode (if not public view)
+    if not public_view and season_metadata.get("episodes"):
+        from app.models import Item as ItemModel, CollectionEntry
+        
+        # Get all episode items for this season
+        episode_numbers = [ep.get("episode_number") for ep in season_metadata["episodes"]]
+        episode_items = ItemModel.objects.filter(
+            media_id=media_id,
+            source=source,
+            media_type=MediaTypes.EPISODE.value,
+            season_number=season_number,
+            episode_number__in=episode_numbers,
+        )
+        
+        # Get all collection entries for these episodes in one query
+        episode_item_ids = list(episode_items.values_list('id', flat=True))
+        collection_entries = {}
+        if episode_item_ids:
+            collection_entries_qs = CollectionEntry.objects.filter(
+                user=request.user,
+                item_id__in=episode_item_ids,
+            )
+            # Map by (season_number, episode_number) for quick lookup
+            for entry in collection_entries_qs:
+                if entry.item.episode_number is not None:
+                    collection_entries[entry.item.episode_number] = entry
+        
+        # Add collection_entry to each episode
+        for episode in season_metadata["episodes"]:
+            episode_number = episode.get("episode_number")
+            episode["collection_entry"] = collection_entries.get(episode_number)
+
     # Enrich related items with user tracking data
     # For public views, use list owner's data if available
     if season_metadata.get("related"):
@@ -2114,6 +2214,10 @@ def season_details(
         "user_medias": user_medias,
         "current_instance": current_instance,
         "public_view": public_view,
+        "collection_entry": collection_entry,
+        "collection_stats": season_collection_stats,  # For season, this is episode stats
+        "fetching_collection_data": fetching_collection_data if not public_view else False,
+        "item_id_for_polling": item_id_for_polling if not public_view else None,
         "collection_entry": collection_entry,
         "collection_stats": season_collection_stats,  # For season, this is episode stats
         "fetching_collection_data": fetching_collection_data if not public_view else False,
@@ -2367,6 +2471,9 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
                 )
 
         item.fetch_releases(delay=False)
+
+        # Sync rating from Plex if user has Plex connected and webhooks configured
+        _sync_plex_rating(request, item, media_type)
 
         # Sync rating from Plex if user has Plex connected and webhooks configured
         _sync_plex_rating(request, item, media_type)
@@ -3628,6 +3735,8 @@ def delete_history_record(request, media_type, history_id):
             str(history_id),
             media_type_lower,
             media_instance_id,
+            media_type_lower,
+            media_instance_id,
         )
 
         # Invalidate caches since history changed.
@@ -3636,8 +3745,11 @@ def delete_history_record(request, media_type, history_id):
         if media_type_lower in ("game", "boardgame"):
             start_dt = start_date or end_date
             end_dt = end_date or start_date
+            start_dt = start_date or end_date
+            end_dt = end_date or start_date
             history_day_keys = history_cache.history_day_keys_for_range(start_dt, end_dt)
         else:
+            activity_dt = end_date or start_date or created_at
             activity_dt = end_date or start_date or created_at
             history_day_key = history_cache.history_day_key(activity_dt)
             history_day_keys = [history_day_key] if history_day_key else []
@@ -4640,6 +4752,10 @@ def artist_detail(request, artist_id):
     from app.helpers import get_artist_collection_stats
     collection_stats = get_artist_collection_stats(request.user, artist)
 
+    # Get collection statistics for this artist
+    from app.helpers import get_artist_collection_stats
+    collection_stats = get_artist_collection_stats(request.user, artist)
+
     context = {
         "user": request.user,
         "artist": artist,
@@ -4655,6 +4771,7 @@ def artist_detail(request, artist_id):
         "bio": bio,  # Wikipedia extract
         "mb_rating": mb_rating,
         "mb_rating_count": mb_rating_count,
+        "collection_stats": collection_stats,
         "collection_stats": collection_stats,
     }
     return render(request, "app/music_artist_detail.html", context)
@@ -4870,6 +4987,23 @@ def album_detail(request, album_id):
             )
             collection_entries_by_item_id = {ce.item_id: ce for ce in collection_entries}
     
+    
+    # Get collection entries for all tracks in one query (if user is authenticated)
+    from app.helpers import is_item_collected
+    from app.models import CollectionEntry
+    
+    collection_entries_by_item_id = {}
+    if request.user.is_authenticated:
+        # Get all item IDs from music entries
+        music_item_ids = [m.item_id for m in user_music_entries if m.item_id]
+        if music_item_ids:
+            # Fetch all collection entries for these items in one query
+            collection_entries = CollectionEntry.objects.filter(
+                user=request.user,
+                item_id__in=music_item_ids,
+            )
+            collection_entries_by_item_id = {ce.item_id: ce for ce in collection_entries}
+    
     for track in all_tracks:
         # Look up user's Music entry for this track
         music_entry = user_music_by_track.get(track.id)
@@ -4881,10 +5015,16 @@ def album_detail(request, album_id):
         if music_entry and music_entry.item_id:
             collection_entry = collection_entries_by_item_id.get(music_entry.item_id)
 
+        # Get collection entry for this track
+        collection_entry = None
+        if music_entry and music_entry.item_id:
+            collection_entry = collection_entries_by_item_id.get(music_entry.item_id)
+
         track_data = {
             "track": track,
             "music": music_entry,
             "history": list(music_entry.history.all().order_by("-end_date")) if music_entry else [],
+            "collection_entry": collection_entry,
             "collection_entry": collection_entry,
         }
         tracks_with_data.append(track_data)
@@ -4939,6 +5079,10 @@ def album_detail(request, album_id):
     from app.helpers import get_album_collection_metadata
     collection_metadata = get_album_collection_metadata(request.user, album)
 
+    # Get collection metadata for this album (aggregated from tracks)
+    from app.helpers import get_album_collection_metadata
+    collection_metadata = get_album_collection_metadata(request.user, album)
+
     context = {
         "user": request.user,
         "album": album,
@@ -4951,6 +5095,7 @@ def album_detail(request, album_id):
         "total_runtime": total_runtime,
         "has_mb_identity": has_mb_identity,  # For template to show correct message
         "album_tracker": album_tracker,  # User's tracking for this album
+        "collection_metadata": collection_metadata,  # Collection metadata aggregated from tracks
         "collection_metadata": collection_metadata,  # Collection metadata aggregated from tracks
     }
     return render(request, "app/music_album_detail.html", context)
@@ -7042,6 +7187,167 @@ def _adjust_month_delta(reference_date, months):
 
 def _dates_close(date_one, date_two, tolerance_days=1):
     return abs((date_one - date_two).days) <= tolerance_days
+
+
+@require_GET
+def collection_list(request, media_type=None):
+    """Display user's collection, optionally filtered by media_type."""
+    collection = helpers.get_user_collection(request.user, media_type)
+    paginator = Paginator(collection, 20)
+    page_number = request.GET.get("page", 1)
+
+    try:
+        page_obj = paginator.page(page_number)
+    except EmptyPage:
+        page_obj = paginator.page(paginator.num_pages)
+
+    return render(
+        request,
+        "app/collection_list.html",
+        {
+            "collection_entries": page_obj,
+            "media_type": media_type,
+        },
+    )
+
+
+@require_POST
+def collection_add(request):
+    """Add item to collection (with optional metadata)."""
+    item_id = request.POST.get("item_id")
+    if not item_id:
+        if request.headers.get("HX-Request"):
+            return HttpResponseBadRequest("Item ID is required")
+        messages.error(request, "Item ID is required")
+        return redirect("collection_list")
+
+    try:
+        item = Item.objects.get(id=item_id)
+    except Item.DoesNotExist:
+        if request.headers.get("HX-Request"):
+            return HttpResponseBadRequest("Item not found")
+        messages.error(request, "Item not found")
+        return redirect("collection_list")
+
+    # Check if entry already exists
+    existing_entry = helpers.is_item_collected(request.user, item)
+    
+    # Create mutable POST data and add item
+    post_data = request.POST.copy()
+    post_data["item"] = item.id
+    
+    if existing_entry:
+        # Update instead of creating duplicate
+        form = CollectionEntryForm(post_data, instance=existing_entry, user=request.user)
+    else:
+        form = CollectionEntryForm(post_data, user=request.user)
+
+    if form.is_valid():
+        entry = form.save(commit=False)
+        entry.user = request.user
+        entry.item = item
+        entry.save()
+        messages.success(request, f"Added {item.title} to collection")
+    else:
+        helpers.form_error_messages(form, request)
+
+    if request.headers.get("HX-Request"):
+        return JsonResponse({"success": True, "message": f"Added {item.title} to collection"})
+    return redirect("collection_list")
+
+
+@require_POST
+def collection_update(request, entry_id):
+    """Update collection entry metadata."""
+    try:
+        entry = CollectionEntry.objects.get(id=entry_id, user=request.user)
+    except CollectionEntry.DoesNotExist:
+        from django.http import Http404
+        raise Http404("Collection entry not found")
+
+    form = CollectionEntryForm(request.POST, instance=entry, user=request.user)
+    if form.is_valid():
+        form.save()
+        messages.success(request, f"Updated collection entry for {entry.item.title}")
+    else:
+        helpers.form_error_messages(form, request)
+
+    if request.headers.get("HX-Request"):
+        return JsonResponse({"success": True, "message": f"Updated collection entry"})
+    return redirect("collection_list")
+
+
+@require_POST
+def collection_remove(request, entry_id):
+    """Remove item from collection."""
+    try:
+        entry = CollectionEntry.objects.get(id=entry_id, user=request.user)
+    except CollectionEntry.DoesNotExist:
+        from django.http import Http404
+        raise Http404("Collection entry not found")
+
+    item_title = entry.item.title
+    entry.delete()
+    messages.success(request, f"Removed {item_title} from collection")
+
+    if request.headers.get("HX-Request"):
+        return JsonResponse({"success": True, "message": f"Removed {item_title} from collection"})
+    return redirect("collection_list")
+
+
+@never_cache
+@require_GET
+def collection_modal(request, source, media_type, media_id):
+    """Return modal HTML for adding/editing collection entry."""
+    try:
+        item = Item.objects.get(
+            media_id=media_id,
+            source=source,
+            media_type=media_type,
+        )
+    except Item.DoesNotExist:
+        if request.headers.get("HX-Request"):
+            return HttpResponseBadRequest("Item not found")
+        messages.error(request, "Item not found")
+        return redirect("home")
+
+    # Check if collection entry already exists
+    existing_entry = helpers.is_item_collected(request.user, item)
+    form = CollectionEntryForm(instance=existing_entry, user=request.user)
+    form.fields["item"].initial = item.id
+
+    return_url = request.GET.get("return_url", "")
+
+    return render(
+        request,
+        "app/components/collection_modal.html",
+        {
+            "item": item,
+            "entry": existing_entry,
+            "form": form,
+            "return_url": return_url,
+        },
+    )
+
+
+@login_required
+@require_GET
+@never_cache
+def collection_status_api(request, item_id):
+    """API endpoint to check if collection entry exists for an item."""
+    from django.http import JsonResponse
+    from app.helpers import is_item_collected
+    
+    try:
+        item = Item.objects.get(id=item_id)
+        collection_entry = is_item_collected(request.user, item)
+        
+        return JsonResponse({
+            "has_collection_data": collection_entry is not None,
+            "item_id": item_id,
+        })
+    except Item.DoesNotExist:
+        return JsonResponse({"error": "Item not found"}, status=404)
 
 
 @require_GET

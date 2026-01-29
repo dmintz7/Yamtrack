@@ -3265,6 +3265,86 @@ class CollectionEntry(models.Model):
         blank=True,
         help_text="When the Plex rating key was last updated",
     )
+class CollectionEntry(models.Model):
+    """Model to store user's collected media items with optional A/V metadata."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    item = models.ForeignKey(Item, on_delete=models.CASCADE)
+
+    # Timestamps
+    collected_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When the item was added to collection",
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        help_text="When the collection entry was last updated",
+    )
+
+    # Media source/format metadata
+    media_type = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="Physical/digital source: bluray, dvd, digital, etc.",
+    )
+
+    # Video metadata
+    resolution = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="Resolution: 720p, 1080p, 4k, etc.",
+    )
+    hdr = models.CharField(
+        max_length=30,
+        blank=True,
+        default="",
+        help_text="HDR format: HDR10, Dolby Vision, etc.",
+    )
+    is_3d = models.BooleanField(
+        default=False,
+        help_text="Whether the media is 3D",
+    )
+
+    # Audio metadata
+    audio_codec = models.CharField(
+        max_length=30,
+        blank=True,
+        default="",
+        help_text="Audio codec: AAC, DTS, TrueHD, Atmos, etc.",
+    )
+    audio_channels = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="Audio channels: 2.0, 5.1, 7.1.2, etc.",
+    )
+    bitrate = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Audio bitrate in kbps (e.g., 128, 320, 1411)",
+    )
+
+    # Plex rating key cache (for faster bulk imports)
+    plex_rating_key = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Cached Plex rating key for this item (populated from webhook events)",
+    )
+    plex_uri = models.CharField(
+        max_length=500,
+        null=True,
+        blank=True,
+        help_text="Cached Plex server URI for this item",
+    )
+    plex_rating_key_updated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the Plex rating key was last updated",
+    )
 
     class Meta:
         constraints = [
@@ -3282,3 +3362,5 @@ class CollectionEntry(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.item.title}"
+
+
