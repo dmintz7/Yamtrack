@@ -10,11 +10,14 @@ from datetime import UTC, datetime
 
 from django.conf import settings
 from django.utils import timezone
+from django.utils.timezone import make_aware
+from unidecode import unidecode
 
 import app
-from app.models import MediaTypes, Sources, Status
+from app.models import MediaTypes, Sources, Status, Item
 from app.providers import services
 from app.services.music import prefetch_album_covers
+from integrations.models import PlexHistory
 
 # Suppress InsecureRequestWarning (Plex local connections often use self-signed certs)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -55,6 +58,7 @@ class PlexHistoryImporter:
         self.existing_media = helpers.get_existing_media(user)
         self.to_delete = defaultdict(lambda: defaultdict(set))
         self.bulk_media = defaultdict(list)
+        self.history_entries = []
         self.media_instances = defaultdict(lambda: defaultdict(list))
         self.counts = defaultdict(int)
         self.summary_counts = defaultdict(int)
@@ -85,8 +89,7 @@ class PlexHistoryImporter:
         self._artists_for_prefetch: set[int] = set()
         # Track unique music tracks (by item key) for counting purposes
         self._unique_music_tracks: set[tuple[str, str]] = set()
-        # Store ratings from library items to apply during bulk media creation
-        self._library_ratings: dict[tuple[str, str], float] = {}
+        self._watch_sync_enabled = str(settings.PLEX_WATCH_SYNC).lower() == "true"
 
     def import_data(self):
         """Import history for the selected library."""
@@ -110,7 +113,10 @@ class PlexHistoryImporter:
                 raise
             except Exception as exc:  # pragma: no cover - defensive
                 msg = f"Unexpected error importing Plex section {section.get('title')}: {exc}"
-                raise MediaImportUnexpectedError(msg) from exc
+                import sys
+                logger.error('Error on line {} - {} - {}'.format(type(exc).__name__, sys.exc_info()[-1].tb_lineno, exc))
+                if 'Max retries exceeded' not in str(exc):
+                    raise MediaImportUnexpectedError(msg) from exc
 
         if self.mode == "new":
             self._build_existing_dedupe_sets()
@@ -122,8 +128,12 @@ class PlexHistoryImporter:
         self._warm_tv_metadata_cache()
         logger.info("Building bulk media instances...")
         self._build_bulk_media()
-        logger.info("Finalizing bulk creation...")
-        helpers.bulk_create_media(self.bulk_media, self.user)
+        if self._watch_sync_enabled:
+            logger.info(f"Plex Watch Sync Enabled. Processing History - {len(self.history_entries)} records.")
+            self.process_history_entries()
+        else:
+            logger.info("Finalizing bulk creation...")
+            helpers.bulk_create_media(self.bulk_media, self.user)
 
         self._prefetch_collected_album_covers()
         self._enqueue_fast_runtime_backfill()
@@ -423,6 +433,10 @@ class PlexHistoryImporter:
         logger.debug("Processing entry '%s' (type=%s, section=%s)", title, media_type, section_type)
         if not self._is_allowed_history_user(metadata):
             return
+
+        if self._watch_sync_enabled:
+            self.history_entries.append(entry)
+
         metadata["Guid"] = self._normalize_guid_list(
             metadata.get("Guid") or metadata.get("guid"),
         )
@@ -1656,3 +1670,131 @@ class PlexHistoryImporter:
                 prefetch_album_covers(artist, limit=None)
             except Exception as exc:  # pragma: no cover - defensive network guard
                 logger.debug("Cover prefetch failed for artist %s: %s", artist_id, exc)
+
+    def process_history_entries(self) -> None:
+        from plexapi.server import PlexServer
+        plex_connection = PlexServer(settings.PLEX_HOST, self.account.plex_token)
+
+        def create_plex_title(video):
+            try:
+                if video['type'] in ("movie", "show"):
+                    try:
+                        title = "%s (%s)" % (video['title'], video['originallyAvailableAt'])
+                    except KeyError:
+                        title = video['title']
+                else:
+                    title = "%s - S%sE%s - %s" % (video['grandparentTitle'], video['parentIndex'], video['index'], video['title'])
+                return unidecode(title)
+            except Exception as e:
+                logger.error(video)
+                return "Unknown, check errors"
+
+        added = exist =skipped = errored = 0
+        logger.info(f"Found {len(self.history_entries)} history records for user {self.user.plex_usernames}")
+        for record in self.history_entries:
+            if record.get("accountID") != 1:
+                continue
+
+            viewed_at = make_aware(datetime.fromtimestamp(record.get("viewedAt")))
+            log_ctx = f"Type: {record.get('type')} | Viewed: {viewed_at.strftime('%Y-%m-%d %H:%M:%S')} | Rating Key: {record.get('ratingKey')} | Title: {create_plex_title(record)}"
+            try:
+                plex_obj = plex_connection.fetchItem(int(record.get("ratingKey")))
+                tmdb_id = next((g.id.split("://")[-1] for g in plex_obj.guids if g.id.startswith("tmdb:")), None, )
+                item = None
+                if not tmdb_id:
+                    message = "No TMDb ID"
+                else:
+                    if record.get('type') == "movie":
+                        item, created = Item.objects.get_or_create(
+                            media_id=tmdb_id,
+                            source=Sources.TMDB.value,
+                            media_type=MediaTypes.MOVIE.value,
+                            defaults={
+                                "title": record.get("title"),
+                                "image": record.get("thumb"),
+                            },
+                        )
+
+                        if created:
+                            added += 1
+                            message = "Movie item created"
+                        else:
+                            exist += 1
+                            message = "Movie item found"
+
+                    elif record.get('type') == "episode":
+                        show = plex_obj.show()
+
+                        show_tmdb_id = next(
+                            (g.id.split("://")[-1] for g in show.guids if g.id.startswith("tmdb:")),
+                            None,
+                        )
+
+                        if not show_tmdb_id:
+                            message = "No show TMDb ID"
+                        else:
+                            Item.objects.get_or_create(
+                                media_id=show_tmdb_id,
+                                source=Sources.TMDB.value,
+                                media_type=MediaTypes.TV.value,
+                                defaults={
+                                    "title": show.title,
+                                    "image": show.thumb,
+                                },
+                            )
+
+                            season_number = record['parentIndex']
+                            episode_number = record['index']
+                            Item.objects.get_or_create(
+                                media_id=show_tmdb_id,
+                                source=Sources.TMDB.value,
+                                media_type=MediaTypes.SEASON.value,
+                                season_number=season_number,
+                                defaults={
+                                    "title": show.title,
+                                    "image": show.thumb,
+                                },
+                            )
+
+                            item, created = Item.objects.get_or_create(
+                                media_id=show_tmdb_id,
+                                source=Sources.TMDB.value,
+                                media_type=MediaTypes.EPISODE.value,
+                                season_number=season_number,
+                                episode_number=episode_number,
+                                defaults={
+                                    "title": show.title,
+                                    "image": record['thumb'],
+                                },
+                            )
+                            if created:
+                                added += 1
+                                message = "Episode item created"
+                            else:
+                                exist += 1
+                                message = "Episode item found"
+
+                    else:
+                        logger.warning(f"Skipping unsupported media type - {create_plex_title(record)}")
+                        skipped += 1
+                        continue
+
+                history_key = record.get("historyKey").rsplit("/", 1)[-1]
+                plex_history, created = PlexHistory.objects.update_or_create(
+                    user=self.user,
+                    plex_history_id=history_key,
+                    defaults={
+                        "item": item,
+                        "plex_id": plex_obj.ratingKey,
+                        "viewed_at": viewed_at,
+                        "device_id": record.get('deviceID'),
+                    },
+                )
+
+                logger.info(f"{'Created' if created else '  Found'} PlexHistory | {log_ctx} | {message}")
+
+            except Exception as exc:
+                logger.exception(f"Unexpected error | {log_ctx} | err={exc}")
+                errored += 1
+
+        logger.info( f"Plex history sync complete user_id={self.user.id} added={added} skipped={skipped} errored={errored}")

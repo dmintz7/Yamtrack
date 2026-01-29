@@ -231,3 +231,25 @@ class UnresolvedImport(models.Model):
     raw_data = models.JSONField(null=True, blank=True)
     found_metadata_source = models.CharField(max_length=128, blank=True, null=True)
     found_metadata_source_identifier = models.CharField(max_length=128, blank=True, null=True)
+
+
+class PlexHistory(models.Model):
+    """Store Plex watch history entries, matching plex-trakt.plex_views."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="plex_history",)
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, blank=True, null=True, related_name="plex_history")
+    plex_id = models.IntegerField()
+    plex_history_id = models.IntegerField(unique=True)
+    viewed_at = models.DateTimeField()
+    device_id = models.IntegerField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-viewed_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "item", "viewed_at"],
+                name="unique_user_item_viewed_at",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.item} ({self.viewed_at})"
