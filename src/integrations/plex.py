@@ -377,7 +377,6 @@ def fetch_metadata(token: str, uri: str, rating_key: str, timeout: int = 20) -> 
             headers=_headers(token),
             params={"X-Plex-Token": token},
             timeout=timeout,
-            timeout=timeout,
             verify=settings.PLEX_SSL_VERIFY,
         )
     except RequestException as exc:

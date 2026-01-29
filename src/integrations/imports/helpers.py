@@ -352,7 +352,7 @@ def bulk_create_unresolved(unresolved, batch_size=500):
     seen = set()
     unique_unresolved = []
     for entry in unresolved:
-        key = (entry.user_id, entry.metadata_source.value, entry.metadata_source_identifier, entry.media_type)
+        key = (entry.user_id, entry.metadata_source, entry.metadata_source_identifier, entry.media_type)
         if key in seen:
             continue
         seen.add(key)

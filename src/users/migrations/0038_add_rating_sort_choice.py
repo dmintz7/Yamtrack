@@ -13,6 +13,10 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RemoveConstraint(
             model_name="user",
+            name="home_sort_valid",
+        ),
+        migrations.RemoveConstraint(
+            model_name="user",
             name="list_detail_sort_valid",
         ),
         migrations.AlterField(

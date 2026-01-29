@@ -192,7 +192,12 @@ from app.models import CollectionEntry  # noqa: E402
 
 admin.site.register(CollectionEntry, CollectionEntryAdmin)
 
-@admin.register(UnresolvedImport)
-class UnresolvedImporterAdmin(admin.ModelAdmin):
+
+class UnresolvedImportAdmin(admin.ModelAdmin):
     list_display = ["user", "media_type", "metadata_source", "metadata_source_identifier", "found_metadata_source", "found_metadata_source_identifier"]
     search_fields = ["media_type", "metadata_source", "metadata_source_identifier"]
+
+# Register CollectionEntry with custom admin class
+from integrations.models import UnresolvedImport  # noqa: E402
+
+admin.site.register(UnresolvedImport, UnresolvedImportAdmin)
