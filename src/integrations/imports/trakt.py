@@ -171,6 +171,7 @@ class TraktImporter:
         self.user = user
         self.mode = mode
         self.refresh_token = refresh_token
+        self.base_url = TRAKT_API_BASE_URL
         self.user_base_url = f"{TRAKT_API_BASE_URL}/users/{username}"
         self.warnings = []
 
@@ -426,6 +427,7 @@ class TraktImporter:
     def process_watched_episode(self, entry):
         """Process a single episode watch event."""
         show = entry["show"]
+        episode = entry["episode"]
         tmdb_id = self._get_tmdb_id(show)
         if not tmdb_id:
             return
@@ -442,8 +444,8 @@ class TraktImporter:
             return
 
         # Extract episode data
-        season_number = entry["episode"]["season"]
-        episode_number = entry["episode"]["number"]
+        season_number = episode["season"]
+        episode_number = episode["number"]
 
         # Get TV metadata
         tv_metadata = self._get_metadata(MediaTypes.TV.value, tmdb_id, show["title"])
@@ -457,6 +459,19 @@ class TraktImporter:
             show["title"],
             season_number,
         )
+        if not season_metadata:
+            if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
+                return
+
+            season_number = found_info["season_number"]
+            episode_number = found_info["episode_number"]
+            season_metadata = self._get_metadata(
+                MediaTypes.SEASON.value,
+                tmdb_id,
+                show["title"],
+                season_number,
+            )
+
         if not season_metadata:
             return
 

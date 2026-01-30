@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import time
+from dateutil.parser import parse as parse_date
 from collections import defaultdict
 
 from cryptography.fernet import Fernet
@@ -17,6 +18,9 @@ from simple_history.utils import bulk_create_with_history
 
 import app
 from app.models import MediaTypes
+from app.providers import tmdb
+from app.providers import services
+from app.models import Sources
 
 logger = logging.getLogger(__name__)
 
@@ -341,3 +345,119 @@ def encrypt(value):
 def decrypt(token):
     """Decrypt value that was encrypted with `encrypt`."""
     return fernet().decrypt(token.encode()).decode()
+
+
+class TMDBResolver:
+    def __init__(self, trakt_data, trakt_class):
+        self.trakt = trakt_class
+        self.trakt_data = trakt_data
+        self.trakt_episode_id = trakt_data["episode"]["ids"]["trakt"]
+        self.tmdb_show_id = trakt_data["show"]["ids"]["tmdb"]
+        self.episode_title = trakt_data["episode"]["title"]
+        self.show_data = None
+        self.seasons_cache = {}
+        self.episodes_cache = {}
+
+    @staticmethod
+    def _tmdb_get(path):
+        return services.api_request(
+            Sources.TMDB.value,
+            "GET",
+            f"{tmdb.base_url}/{path}",
+            params=tmdb.base_params,
+        )
+
+    def resolve(self):
+        if not self.trakt_episode_id or not self.tmdb_show_id:
+            logger.warning("Missing TVDB episode ID or TMDB show ID")
+            return None
+
+        episode_airdate = self._fetch_trakt_airdate()
+        if not episode_airdate:
+            logger.warning("Failed to fetch episode airdate from Trakt")
+            return None
+
+        self.show_data = self._fetch_show_data()
+        if not self.show_data:
+            logger.warning("Failed to fetch show data from TMDB")
+            return None
+
+        season_number = self._match_season(episode_airdate)
+        if not season_number:
+            logger.warning("No matching season found for airdate %s", episode_airdate)
+            return None
+
+        matched_episode = self._match_episode(season_number, airdate=episode_airdate)
+        if matched_episode:
+            logger.info(
+                "Matched episode: Season %s Episode %s (%s)",
+                season_number,
+                matched_episode.get("episode_number"),
+                matched_episode.get("name"),
+            )
+            return matched_episode
+
+        logger.warning("No matching episode found for airdate/title")
+        return None
+
+    def _fetch_trakt_airdate(self):
+        """Fetch the airdate of an episode from Trakt using the episode ID."""
+        try:
+            data = self.trakt._make_api_request(f"{self.trakt.base_url}/episodes/{self.trakt_episode_id}?extended=full")
+        except Exception:
+            return None
+
+        first_aired = data.get("first_aired")
+        if not first_aired:
+            return None
+
+        airdate = parse_date(first_aired)
+        return airdate.date() if airdate else None
+
+    def _fetch_show_data(self):
+        logger.info("Fetching TMDB show data for show ID %s", self.tmdb_show_id)
+        return self._tmdb_get(f"tv/{self.tmdb_show_id}")
+
+    def _fetch_season_episodes(self, season_number):
+        if season_number in self.episodes_cache:
+            logger.info("Using cached episodes for season %s", season_number)
+            return self.episodes_cache[season_number]
+
+        logger.info("Fetching episodes for season %s of show %s", season_number, self.tmdb_show_id)
+        resp = self._tmdb_get(f"tv/{self.tmdb_show_id}/season/{season_number}")
+        episodes = resp.get("episodes", [])
+        self.episodes_cache[season_number] = episodes
+        return episodes
+
+    def _match_season(self, episode_airdate):
+        for season in reversed(self.show_data.get("seasons", [])):
+            season_number = season["season_number"]
+            first_air = season.get("air_date")
+            logger.info(f"First air date: {first_air}")
+            if not first_air:
+                continue
+            first_air_date = parse_date(first_air).date()
+            if first_air_date <= episode_airdate:
+                logger.info("Matched season %s (first air date %s)", season_number, first_air_date)
+                return season_number
+        return None
+
+    def _match_episode(self, season_number, airdate=None, title=None):
+        episodes = self._fetch_season_episodes(season_number)
+
+        if airdate:
+            for ep in episodes:
+                if ep.get("air_date") and parse_date(ep["air_date"]).date() == airdate:
+                    logger.info("Found episode by airdate: %s", ep.get("name"))
+                    return ep
+
+        if title:
+            title_norm = title.lower()
+            for ep in episodes:
+                ep_title = ep.get("name", "").lower()
+                if ep_title == title_norm:
+                    logger.info("Found episode by title: %s", ep.get("name"))
+                    return ep
+
+        logger.warning("No episode matched for season %s", season_number)
+        return None
