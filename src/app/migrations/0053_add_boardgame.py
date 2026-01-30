@@ -10,55 +10,15 @@ from django.db import migrations, models
 from django.db.utils import OperationalError
 
 
-class CreateModelIfNotExists(migrations.CreateModel):
-    """CreateModel that skips if table already exists (for SQLite compatibility)."""
-    
-    def database_forwards(self, app_label, schema_editor, from_state, to_state):
-        if schema_editor.connection.vendor == "sqlite":
-            # Check if table already exists
-            table_name = f"{app_label}_{self.name.lower()}"
-            with schema_editor.connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                    [table_name]
-                )
-                if cursor.fetchone():
-                    # Table exists, skip creation
-                    return
-        
-        # Table doesn't exist or not SQLite, proceed normally
-        super().database_forwards(app_label, schema_editor, from_state, to_state)
-
-
-class AddFieldIfNotExists(migrations.AddField):
-    """AddField that skips if column already exists (for SQLite compatibility)."""
-
-    def database_forwards(self, app_label, schema_editor, from_state, to_state):
-        if schema_editor.connection.vendor == "sqlite":
-            model = to_state.apps.get_model(app_label, self.model_name)
-            field = model._meta.get_field(self.name)
-            table_name = model._meta.db_table
-            column_name = field.column
-            with schema_editor.connection.cursor() as cursor:
-                cursor.execute(
-                    f"PRAGMA table_info({schema_editor.quote_name(table_name)})"
-                )
-                columns = {row[1] for row in cursor.fetchall()}
-            if column_name in columns:
-                return
-
-        super().database_forwards(app_label, schema_editor, from_state, to_state)
-
 
 class Migration(migrations.Migration):
 
     dependencies = [
         ('app', '0052_alter_item_title'),
-        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
-        CreateModelIfNotExists(
+        migrations.CreateModel(
             name='BoardGame',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
@@ -76,7 +36,7 @@ class Migration(migrations.Migration):
                 'abstract': False,
             },
         ),
-        CreateModelIfNotExists(
+        migrations.CreateModel(
             name='HistoricalBoardGame',
             fields=[
                 ('id', models.BigIntegerField(auto_created=True, blank=True, db_index=True, verbose_name='ID')),
@@ -125,17 +85,17 @@ class Migration(migrations.Migration):
             model_name='item',
             constraint=models.CheckConstraint(condition=models.Q(('media_type__in', ['tv', 'season', 'episode', 'movie', 'anime', 'manga', 'game', 'book', 'comic', 'boardgame', 'music', 'podcast'])), name='app_item_media_type_valid'),
         ),
-        AddFieldIfNotExists(
+        migrations.AddField(
             model_name='boardgame',
             name='item',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='app.item'),
         ),
-        AddFieldIfNotExists(
+        migrations.AddField(
             model_name='boardgame',
             name='user',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL),
         ),
-        AddFieldIfNotExists(
+        migrations.AddField(
             model_name='historicalboardgame',
             name='history_user',
             field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to=settings.AUTH_USER_MODEL),
