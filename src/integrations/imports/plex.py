@@ -89,6 +89,7 @@ class PlexHistoryImporter:
         self._artists_for_prefetch: set[int] = set()
         # Track unique music tracks (by item key) for counting purposes
         self._unique_music_tracks: set[tuple[str, str]] = set()
+        self._library_ratings: dict[tuple[str, str], float] = {}
         self._watch_sync_enabled = str(settings.PLEX_WATCH_SYNC).lower() == "true"
 
     def import_data(self):
