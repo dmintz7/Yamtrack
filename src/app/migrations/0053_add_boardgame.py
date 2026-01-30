@@ -38,6 +38,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.DeleteModel(name='BoardGame',),
+        migrations.DeleteModel(name='HistoricalBoardGame',),
         migrations.CreateModel(
             name='BoardGame',
             fields=[
