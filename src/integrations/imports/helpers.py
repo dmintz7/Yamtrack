@@ -356,17 +356,6 @@ class TMDBResolver:
         self.tmdb_show_id = trakt_data["show"]["ids"]["tmdb"]
         self.episode_title = trakt_data["episode"]["title"]
         self.show_data = None
-        self.seasons_cache = {}
-        self.episodes_cache = {}
-
-    @staticmethod
-    def _tmdb_get(path):
-        return services.api_request(
-            Sources.TMDB.value,
-            "GET",
-            f"{tmdb.base_url}/{path}",
-            params=tmdb.base_params,
-        )
 
     def resolve(self):
         if not self.trakt_episode_id or not self.tmdb_show_id:
@@ -390,12 +379,7 @@ class TMDBResolver:
 
         matched_episode = self._match_episode(season_number, airdate=episode_airdate)
         if matched_episode:
-            logger.info(
-                "Matched episode: Season %s Episode %s (%s)",
-                season_number,
-                matched_episode.get("episode_number"),
-                matched_episode.get("name"),
-            )
+            logger.info(f"Matched episode: Season {season_number} Episode {matched_episode.get('episode_number')} ({matched_episode.get('name')})")
             return matched_episode
 
         logger.warning("No matching episode found for airdate/title")
@@ -416,30 +400,25 @@ class TMDBResolver:
         return airdate.date() if airdate else None
 
     def _fetch_show_data(self):
-        logger.info("Fetching TMDB show data for show ID %s", self.tmdb_show_id)
-        return self._tmdb_get(f"tv/{self.tmdb_show_id}")
+        logger.debug("Fetching TMDB show data for show ID %s", self.tmdb_show_id)
+        return tmdb.tv(self.tmdb_show_id)
 
     def _fetch_season_episodes(self, season_number):
-        if season_number in self.episodes_cache:
-            logger.info("Using cached episodes for season %s", season_number)
-            return self.episodes_cache[season_number]
-
-        logger.info("Fetching episodes for season %s of show %s", season_number, self.tmdb_show_id)
-        resp = self._tmdb_get(f"tv/{self.tmdb_show_id}/season/{season_number}")
-        episodes = resp.get("episodes", [])
-        self.episodes_cache[season_number] = episodes
+        logger.debug("Fetching episodes for season %s of show %s", season_number, self.tmdb_show_id)
+        resp = tmdb.tv_with_seasons(self.tmdb_show_id, [season_number])
+        episodes = resp.get(f"season/{season_number}", []).get("episodes", [])
         return episodes
 
     def _match_season(self, episode_airdate):
-        for season in reversed(self.show_data.get("seasons", [])):
+        seasons = self.show_data.get("related", []).get("seasons", [])
+        for season in reversed(seasons):
             season_number = season["season_number"]
-            first_air = season.get("air_date")
-            logger.info(f"First air date: {first_air}")
+            first_air = season.get("first_air_date")
             if not first_air:
                 continue
-            first_air_date = parse_date(first_air).date()
+            first_air_date = first_air.date()
             if first_air_date <= episode_airdate:
-                logger.info("Matched season %s (first air date %s)", season_number, first_air_date)
+                logger.debug("Matched season %s (first air date %s)", season_number, first_air_date)
                 return season_number
         return None
 
@@ -449,7 +428,7 @@ class TMDBResolver:
         if airdate:
             for ep in episodes:
                 if ep.get("air_date") and parse_date(ep["air_date"]).date() == airdate:
-                    logger.info("Found episode by airdate: %s", ep.get("name"))
+                    logger.debug("Found episode by airdate: %s", ep.get("name"))
                     return ep
 
         if title:
@@ -457,7 +436,7 @@ class TMDBResolver:
             for ep in episodes:
                 ep_title = ep.get("name", "").lower()
                 if ep_title == title_norm:
-                    logger.info("Found episode by title: %s", ep.get("name"))
+                    logger.debug("Found episode by title: %s", ep.get("name"))
                     return ep
 
         logger.warning("No episode matched for season %s", season_number)
