@@ -3265,20 +3265,3 @@ class CollectionEntry(models.Model):
         blank=True,
         help_text="When the Plex rating key was last updated",
     )
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["user", "item"],
-                name="unique_user_collection_item",
-            ),
-        ]
-        ordering = ["-collected_at"]
-        indexes = [
-            models.Index(fields=["user", "-collected_at"]),
-            models.Index(fields=["user", "item"]),
-            models.Index(fields=["user", "plex_rating_key"]),
-        ]
-
-    def __str__(self):
-        return f"{self.user.username} - {self.item.title}"

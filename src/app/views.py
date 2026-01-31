@@ -4869,7 +4869,7 @@ def album_detail(request, album_id):
                 item_id__in=music_item_ids,
             )
             collection_entries_by_item_id = {ce.item_id: ce for ce in collection_entries}
-    
+
     for track in all_tracks:
         # Look up user's Music entry for this track
         music_entry = user_music_by_track.get(track.id)

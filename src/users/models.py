@@ -978,6 +978,7 @@ class User(AbstractUser):
         "plex": "Import from Plex",
         "pocketcasts": "Import from Pocket Casts (Recurring)",
         "lastfm": "Poll Last.fm for all users",
+        "unresolved_import": "Process Unresolved Imports",
     }
 
         # Reverse mapping to get source from task name

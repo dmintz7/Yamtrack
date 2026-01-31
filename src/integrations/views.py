@@ -1048,3 +1048,24 @@ def jellyseerr_webhook(request, token):
     processor = jellyseerr_webhooks.JellyseerrWebhookProcessor()
     processor.process_payload(payload, user)
     return HttpResponse(status=200)
+
+
+@require_POST
+def process_unresolved_import(request):
+    """
+    View for queuing reprocessing of unresolved media via Celery.
+    """
+    from integrations import tasks
+    try:
+        tasks.process_unresolved_imports.delay(user_id=request.user.id, username=request.user.username)
+        messages.info(request, "Processing of unresolved imports has been queued.")
+        logger.info("User %s queued unresolved media processing.", request.user.username)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error(
+            "Failed to queue unresolved media processing for user %s: %s",
+            request.user.username,
+            exc,
+        )
+        messages.error(request, f"Failed to queue unresolved imports: {exc}")
+
+    return redirect("import_data")

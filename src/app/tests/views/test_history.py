@@ -123,6 +123,7 @@ class DeleteHistoryRecordViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
 
         # Verify the history record is actually deleted from the database
+        # Verify the history record is actually deleted from the database
         self.assertEqual(
             self.movie.history.filter(history_id=self.history_id).count(),
             0,

@@ -26,6 +26,8 @@ class PlexWebhookProcessor(BaseWebhookProcessor):
         """Process the incoming Plex webhook payload."""
         event_type = payload.get("event")
         logger.info("Received Plex webhook event: %s", event_type)
+        event_type = payload.get("event")
+        logger.info("Received Plex webhook event: %s", event_type)
         logger.debug("Received Plex webhook payload: %s", json.dumps(payload, indent=2))
 
         if not self._is_supported_event(payload.get("event")):
@@ -116,7 +118,7 @@ class PlexWebhookProcessor(BaseWebhookProcessor):
             source = "tvdb_id" if ids.get("tvdb_id") else "imdb_id"
             try:
                 from app.providers import tmdb
-                find_results = tmdb.find(external_id, source=source)
+                find_results = tmdb.find(external_id, external_source=source)
                 
                 tmdb_id = None
                 if media_type == MediaTypes.TV.value:

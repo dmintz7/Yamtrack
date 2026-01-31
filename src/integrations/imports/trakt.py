@@ -13,11 +13,12 @@ from app.models import MediaTypes, Sources, Status
 from app.providers import services
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
+from integrations.models import UnresolvedImport
 
 logger = logging.getLogger(__name__)
 
 TRAKT_API_BASE_URL = "https://api.trakt.tv"
-BULK_PAGE_SIZE = 1000
+BULK_PAGE_SIZE = settings.TRAKT_BULK_PAGE_SIZE
 
 
 def handle_oauth_callback(request, redirect_uri=None, client_id=None, client_secret=None):
@@ -183,6 +184,8 @@ class TraktImporter:
 
         # Track bulk creation lists for each media type
         self.bulk_media = defaultdict(list)
+        self.external_ids = []
+        self.unresolved_imports = []
 
         # Track media instances being created
         self.media_instances = defaultdict(lambda: defaultdict(list))
@@ -202,6 +205,8 @@ class TraktImporter:
 
         helpers.cleanup_existing_media(self.to_delete, self.user)
         helpers.bulk_create_media(self.bulk_media, self.user)
+
+        helpers.bulk_create_unresolved(self.unresolved_imports)
 
         imported_counts = {
             media_type: len(media_list)
@@ -397,6 +402,7 @@ class TraktImporter:
 
         metadata = self._get_metadata(MediaTypes.MOVIE.value, tmdb_id, movie["title"])
         if not metadata:
+            self.queue_unresolved_media("trakt", movie.get("ids", {}).get("trakt"), MediaTypes.MOVIE.value, entry,)
             return
 
         item = self._get_or_create_item(MediaTypes.MOVIE.value, tmdb_id, metadata)
@@ -450,6 +456,7 @@ class TraktImporter:
         # Get TV metadata
         tv_metadata = self._get_metadata(MediaTypes.TV.value, tmdb_id, show["title"])
         if not tv_metadata:
+            self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
             return
 
         # Get Season metadata
@@ -461,6 +468,7 @@ class TraktImporter:
         )
         if not season_metadata:
             if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
+                self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
                 return
 
             season_number = found_info["season_number"]
@@ -473,6 +481,7 @@ class TraktImporter:
             )
 
         if not season_metadata:
+            self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
             return
 
         # Validate episode number exists in TMDB
@@ -492,6 +501,7 @@ class TraktImporter:
                 f"{item_identifier}: not found in {Sources.TMDB.label} "
                 f"with ID {tmdb_id}.",
             )
+            self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
             return
 
         episode_image = self._get_episode_image(episode_number, season_metadata)
@@ -784,3 +794,33 @@ class TraktImporter:
         for media_obj in self.media_instances[media_type][key]:
             for attr, value in defaults.items():
                 setattr(media_obj, attr, value)
+
+    def queue_unresolved_media(self, metadata_source, metadata_source_identifier, media_type, raw_entry):
+        """Queue unresolved media with error handling."""
+        if not metadata_source_identifier:
+            return
+
+        try:
+            self.unresolved_imports.append(
+                UnresolvedImport(
+                    user=self.user,
+                    metadata_source=metadata_source,
+                    metadata_source_identifier=str(metadata_source_identifier),
+                    media_type=media_type,
+                    raw_data=raw_entry,
+                )
+            )
+        except ValueError:
+            logger.warning(
+                "Skipping unresolved media with invalid source '%s' for user %s",
+                metadata_source,
+                getattr(self.user, "username", "<unknown>"),
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to queue unresolved media %s:%s for user %s: %s",
+                metadata_source,
+                metadata_source_identifier,
+                getattr(self.user, "username", "<unknown>"),
+                e,
+            )
