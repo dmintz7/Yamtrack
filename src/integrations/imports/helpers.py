@@ -382,7 +382,7 @@ class TMDBResolver:
             logger.info(f"Matched episode: Season {season_number} Episode {matched_episode.get('episode_number')} ({matched_episode.get('name')})")
             return matched_episode
 
-        logger.warning("No matching episode found for airdate/title")
+        logger.warning(f"No matching episode found by airdate/title in season {season_number}")
         return None
 
     def _fetch_trakt_airdate(self):
@@ -439,7 +439,7 @@ class TMDBResolver:
                     logger.debug("Found episode by title: %s", ep.get("name"))
                     return ep
 
-        logger.warning("No episode matched for season %s", season_number)
+        logger.debug("No episode matched for season %s", season_number)
         return None
       
 def bulk_create_unresolved(unresolved, batch_size=500):
