@@ -479,6 +479,12 @@ class TraktImporter:
         episode_exists = any(
             ep["episode_number"] == episode_number for ep in season_metadata["episodes"]
         )
+        if not episode_exists:
+            if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
+                return
+
+            episode_number = found_info["episode_number"]
+            episode_exists = any(ep["episode_number"] == episode_number for ep in season_metadata["episodes"])
 
         if not episode_exists:
             item_identifier = f"{show['title']} S{season_number}E{episode_number}"
