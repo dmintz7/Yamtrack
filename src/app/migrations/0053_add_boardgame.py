@@ -7,8 +7,28 @@ import model_utils.fields
 import simple_history.models
 from django.conf import settings
 from django.db import migrations, models
-from django.db.utils import OperationalError
 
+
+def _table_exists(schema_editor, table_name: str) -> bool:
+    with schema_editor.connection.cursor() as cursor:
+        introspection = schema_editor.connection.introspection
+        if hasattr(introspection, "table_names"):
+            table_names = introspection.table_names(cursor)
+        else:
+            table_names = [table.name for table in introspection.get_table_list(cursor)]
+    return table_name in table_names
+
+
+def _column_exists(schema_editor, table_name: str, column_name: str) -> bool:
+    with schema_editor.connection.cursor() as cursor:
+        try:
+            description = schema_editor.connection.introspection.get_table_description(
+                cursor, table_name
+            )
+        except Exception:
+            return False
+    columns = {getattr(column, "name", column[0]) for column in description}
+    return column_name in columns
 
 
 class Migration(migrations.Migration):

@@ -26,6 +26,7 @@ MEDIA_TYPE_CONFIG = {
         "verb": ("watch", "watched"),
         "text_color": COLORS["emerald"]["text"],
         "stats_color": COLORS["emerald"]["hex"],
+        "collection_auto_fetch": True,
         "svg_icon": """
             <rect width="20" height="15" x="2" y="7" rx="2" ry="2"/>
             <polyline points="17 2 12 7 7 2"/>""",
@@ -61,6 +62,7 @@ MEDIA_TYPE_CONFIG = {
         "verb": ("watch", "watched"),
         "text_color": COLORS["orange"]["text"],
         "stats_color": COLORS["orange"]["hex"],
+        "collection_auto_fetch": True,
         "svg_icon": """
             <rect width="18" height="18" x="3" y="3" rx="2"/>
             <path d="M7 3v18"/>
@@ -80,6 +82,7 @@ MEDIA_TYPE_CONFIG = {
         "verb": ("watch", "watched"),
         "text_color": COLORS["blue"]["text"],
         "stats_color": COLORS["blue"]["hex"],
+        "collection_auto_fetch": True,
         "svg_icon": """
             <circle cx="12" cy="12" r="10"/>
             <polygon points="10 8 16 12 10 16 10 8"/>""",
@@ -205,6 +208,122 @@ MEDIA_TYPE_CONFIG = {
     },
 }
 
+# --- Collection Field Configuration ---
+COLLECTION_FIELD_CONFIG = {
+    "video": {
+        "fields": [
+            "media_type",
+            "resolution",
+            "hdr",
+            "is_3d",
+            "audio_codec",
+            "audio_channels",
+            "bitrate",
+            "collected_at",
+        ],
+        "labels": {"media_type": "Format", "is_3d": "3D", "collected_at": "Collected At"},
+        "choices": {
+            "media_type": ["4K Blu-ray", "Blu-ray", "DVD", "Digital", "Streaming", "VHS"],
+            "resolution": ["480p", "720p", "1080p", "4K", "8K"],
+            "hdr": ["HDR10", "HDR10+", "Dolby Vision", "HLG"],
+            "audio_codec": [
+                "Dolby Atmos",
+                "Dolby TrueHD",
+                "Dolby Digital Plus",
+                "Dolby Digital",
+                "DTS:X",
+                "DTS-HD MA",
+                "DTS",
+                "AAC",
+                "FLAC",
+                "PCM",
+            ],
+            "audio_channels": ["Mono", "Stereo", "5.1", "7.1", "7.1.2", "7.1.4"],
+            "bitrate": ["128", "192", "256", "320", "1411", "4500", "8000"],
+        },
+    },
+    "music": {
+        "fields": ["media_type", "audio_codec", "audio_channels", "bitrate", "collected_at"],
+        "labels": {"media_type": "Format", "collected_at": "Collected At"},
+        "choices": {
+            "media_type": ["Vinyl", "CD", "Digital", "Cassette", "SACD", "Streaming"],
+            "audio_codec": ["FLAC", "MP3", "AAC", "ALAC", "WAV", "OGG", "Opus"],
+            "audio_channels": ["Mono", "Stereo", "5.1", "7.1"],
+            "bitrate": ["128", "192", "256", "320", "1411"],
+        },
+    },
+    "books": {
+        "fields": ["media_type", "collected_at"],
+        "labels": {"media_type": "Format", "collected_at": "Collected At"},
+        "choices": {
+            "media_type": ["Hardcover", "Paperback", "Trade Paperback", "Digital", "Audiobook"],
+        },
+    },
+    "games": {
+        "fields": [
+            "media_type",
+            "resolution",
+            "hdr",
+            "collected_at",
+        ],
+        "labels": {
+            "media_type": "Format",
+            "resolution": "Platform",
+            "hdr": "Edition",
+            "collected_at": "Collected At",
+        },
+        "choices": {
+            "media_type": ["Physical", "Digital", "ROM", "Subscription", "Cloud"],
+            "resolution": [
+                "PC (Windows)",
+                "Mac",
+                "Linux",
+                "Steam Deck",
+                "PlayStation 5",
+                "PlayStation 4",
+                "Xbox Series X|S",
+                "Xbox One",
+                "Nintendo Switch",
+                "Nintendo Switch 2",
+                "Mobile (iOS)",
+                "Mobile (Android)",
+            ],
+            "hdr": [
+                "Standard",
+                "Deluxe",
+                "Gold",
+                "Ultimate",
+                "Collector's",
+                "Game of the Year",
+                "Complete",
+                "Definitive",
+                "Remastered",
+            ],
+        },
+    },
+    "boardgames": {
+        "fields": ["media_type", "collected_at"],
+        "labels": {"media_type": "Format", "collected_at": "Collected At"},
+        "choices": {
+            "media_type": ["Physical", "Print & Play", "Digital"],
+        },
+    },
+}
+
+COLLECTION_FIELD_BY_TYPE = {
+    MediaTypes.MOVIE.value: COLLECTION_FIELD_CONFIG["video"],
+    MediaTypes.TV.value: COLLECTION_FIELD_CONFIG["video"],
+    MediaTypes.SEASON.value: COLLECTION_FIELD_CONFIG["video"],
+    MediaTypes.EPISODE.value: COLLECTION_FIELD_CONFIG["video"],
+    MediaTypes.ANIME.value: COLLECTION_FIELD_CONFIG["video"],
+    MediaTypes.MUSIC.value: COLLECTION_FIELD_CONFIG["music"],
+    MediaTypes.BOOK.value: COLLECTION_FIELD_CONFIG["books"],
+    MediaTypes.MANGA.value: COLLECTION_FIELD_CONFIG["books"],
+    MediaTypes.COMIC.value: COLLECTION_FIELD_CONFIG["books"],
+    MediaTypes.GAME.value: COLLECTION_FIELD_CONFIG["games"],
+    MediaTypes.BOARDGAME.value: COLLECTION_FIELD_CONFIG["boardgames"],
+}
+
 # --- Status Configuration ---
 STATUS_CONFIG = {
     Status.COMPLETED.value: {
@@ -258,6 +377,17 @@ def get_default_source_name(media_type):
 def get_sample_query(media_type):
     """Get the sample search query."""
     return get_property(media_type, "sample_query")
+
+
+def supports_collection_auto_fetch(media_type):
+    """Return True when collection metadata auto-fetch is enabled for the type."""
+    config_entry = get_config(media_type) or {}
+    return bool(config_entry.get("collection_auto_fetch", False))
+
+
+def get_collection_field_config(media_type):
+    """Return collection field configuration for a media type."""
+    return COLLECTION_FIELD_BY_TYPE.get(media_type, COLLECTION_FIELD_CONFIG["video"])
 
 
 def get_sample_search_url(media_type):
