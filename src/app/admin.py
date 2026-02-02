@@ -8,6 +8,7 @@ from app.models import (
     Episode,
     Item,
 )
+from integrations.models import UnresolvedImport
 
 
 # Custom ModelAdmin classes with search functionality
@@ -85,6 +86,7 @@ SpecialModels = [
     "PodcastEpisode",
     "MetadataBackfillState",
     "CollectionEntry",
+    "UnresolvedImport"
 ]
 for model in app_models:
     if (
@@ -189,3 +191,13 @@ class CollectionEntryAdmin(admin.ModelAdmin):
 from app.models import CollectionEntry  # noqa: E402
 
 admin.site.register(CollectionEntry, CollectionEntryAdmin)
+
+
+class UnresolvedImportAdmin(admin.ModelAdmin):
+    list_display = ["user", "media_type", "metadata_source", "metadata_source_identifier", "found_metadata_source", "found_metadata_source_identifier"]
+    search_fields = ["media_type", "metadata_source", "metadata_source_identifier"]
+
+# Register CollectionEntry with custom admin class
+from integrations.models import UnresolvedImport  # noqa: E402
+
+admin.site.register(UnresolvedImport, UnresolvedImportAdmin)

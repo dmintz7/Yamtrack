@@ -9,34 +9,20 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.SeparateDatabaseAndState(
-            database_operations=[
-                migrations.RunSQL(
-                    sql=migrations.RunSQL.noop,
-                    reverse_sql=migrations.RunSQL.noop,
+            migrations.AddField(
+                model_name="user",
+                name="auto_pause_in_progress_enabled",
+                field=models.BooleanField(
+                    default=False, help_text="Automatically pause stale in-progress items"
                 ),
-                migrations.RunSQL(
-                    sql=migrations.RunSQL.noop,
-                    reverse_sql=migrations.RunSQL.noop,
+            ),
+            migrations.AddField(
+                model_name="user",
+                name="auto_pause_rules",
+                field=models.JSONField(
+                    blank=True,
+                    default=list,
+                    help_text="Auto-pause rules with per-library week thresholds",
                 ),
-            ],
-            state_operations=[
-                migrations.AddField(
-                    model_name="user",
-                    name="auto_pause_in_progress_enabled",
-                    field=models.BooleanField(
-                        default=False, help_text="Automatically pause stale in-progress items"
-                    ),
-                ),
-                migrations.AddField(
-                    model_name="user",
-                    name="auto_pause_rules",
-                    field=models.JSONField(
-                        blank=True,
-                        default=list,
-                        help_text="Auto-pause rules with per-library week thresholds",
-                    ),
-                ),
-            ],
-        ),
-    ]
+            ),
+        ]

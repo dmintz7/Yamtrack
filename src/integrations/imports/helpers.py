@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import time
+from dateutil.parser import parse as parse_date
 from collections import defaultdict
 
 from cryptography.fernet import Fernet
@@ -17,6 +18,10 @@ from simple_history.utils import bulk_create_with_history
 
 import app
 from app.models import MediaTypes
+from app.providers import tmdb
+from app.providers import services
+from app.models import Sources
+from integrations.models import UnresolvedImport
 
 logger = logging.getLogger(__name__)
 
@@ -341,3 +346,200 @@ def encrypt(value):
 def decrypt(token):
     """Decrypt value that was encrypted with `encrypt`."""
     return fernet().decrypt(token.encode()).decode()
+
+
+class TMDBResolver:
+    def __init__(self, trakt_data, trakt_class):
+        self.trakt = trakt_class
+        self.trakt_data = trakt_data
+        self.trakt_episode_id = trakt_data["episode"]["ids"]["trakt"]
+        self.tmdb_show_id = trakt_data["show"]["ids"]["tmdb"]
+        self.episode_title = trakt_data["episode"]["title"]
+        self.show_data = None
+
+    def resolve(self):
+        if not self.trakt_episode_id or not self.tmdb_show_id:
+            logger.warning("Missing TVDB episode ID or TMDB show ID")
+            return None
+
+        episode_airdate = self._fetch_trakt_airdate()
+        if not episode_airdate:
+            logger.warning("Failed to fetch episode airdate from Trakt")
+            return None
+
+        self.show_data = self._fetch_show_data()
+        if not self.show_data:
+            logger.warning("Failed to fetch show data from TMDB")
+            return None
+
+        season_number = self._match_season(episode_airdate)
+        if not season_number:
+            logger.warning("No matching season found for airdate %s", episode_airdate)
+            return None
+
+        matched_episode = self._match_episode(season_number, airdate=episode_airdate)
+        if matched_episode:
+            logger.info(f"Matched episode: Season {season_number} Episode {matched_episode.get('episode_number')} ({matched_episode.get('name')})")
+            return matched_episode
+
+        logger.warning(f"No matching episode found by airdate/title in season {season_number}")
+        return None
+
+    def _fetch_trakt_airdate(self):
+        """Fetch the airdate of an episode from Trakt using the episode ID."""
+        try:
+            data = self.trakt._make_api_request(f"{self.trakt.base_url}/episodes/{self.trakt_episode_id}?extended=full")
+        except Exception:
+            return None
+
+        first_aired = data.get("first_aired")
+        if not first_aired:
+            return None
+
+        airdate = parse_date(first_aired)
+        return airdate.date() if airdate else None
+
+    def _fetch_show_data(self):
+        logger.debug("Fetching TMDB show data for show ID %s", self.tmdb_show_id)
+        return tmdb.tv(self.tmdb_show_id)
+
+    def _fetch_season_episodes(self, season_number):
+        logger.debug("Fetching episodes for season %s of show %s", season_number, self.tmdb_show_id)
+        resp = tmdb.tv_with_seasons(self.tmdb_show_id, [season_number])
+        episodes = resp.get(f"season/{season_number}", []).get("episodes", [])
+        return episodes
+
+    def _match_season(self, episode_airdate):
+        seasons = self.show_data.get("related", []).get("seasons", [])
+        for season in reversed(seasons):
+            season_number = season["season_number"]
+            first_air = season.get("first_air_date")
+            if not first_air:
+                continue
+            first_air_date = first_air.date()
+            if first_air_date <= episode_airdate:
+                logger.debug("Matched season %s (first air date %s)", season_number, first_air_date)
+                return season_number
+        return None
+
+    def _match_episode(self, season_number, airdate=None, title=None):
+        episodes = self._fetch_season_episodes(season_number)
+
+        if airdate:
+            for ep in episodes:
+                if ep.get("air_date") and parse_date(ep["air_date"]).date() == airdate:
+                    logger.debug("Found episode by airdate: %s", ep.get("name"))
+                    return ep
+
+        if title:
+            title_norm = title.lower()
+            for ep in episodes:
+                ep_title = ep.get("name", "").lower()
+                if ep_title == title_norm:
+                    logger.debug("Found episode by title: %s", ep.get("name"))
+                    return ep
+
+        logger.debug("No episode matched for season %s", season_number)
+        return None
+      
+def bulk_create_unresolved(unresolved, batch_size=500):
+    """Bulk create UnresolvedImport objects with deduplication."""
+    if not unresolved:
+        return
+
+    seen = set()
+    unique_unresolved = []
+    for entry in unresolved:
+        key = (entry.user_id, entry.metadata_source, entry.metadata_source_identifier, entry.media_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_unresolved.append(entry)
+
+    retry_on_lock(
+        lambda: UnresolvedImport.objects.bulk_create(
+            unique_unresolved,
+            batch_size=batch_size,
+            ignore_conflicts=True,
+        )
+    )
+
+
+def initiate_unresolved_import(user):
+    unresolved_entries = UnresolvedImport.objects.filter(user=user, found_metadata_source__isnull=False, found_metadata_source_identifier__isnull=False)
+    logger.info("Found %d unresolved entries for user %s", unresolved_entries.count(), user.username)
+
+    warnings = []
+    import_counts = {}  # flat counts per media type
+
+    for unresolved in unresolved_entries:
+        data = unresolved.raw_data
+        media_type = unresolved.media_type
+        found_metadata_source = unresolved.found_metadata_source
+        found_metadata_source_identifier = unresolved.found_metadata_source_identifier
+
+        # Initialize count for this media type
+        import_counts.setdefault(media_type, 0)
+
+        # Fix source ID mapping
+        if media_type == MediaTypes.MOVIE.value:
+            data.setdefault("movie", {}).setdefault("ids", {})[found_metadata_source] = str(found_metadata_source_identifier)
+        elif media_type == MediaTypes.TV.value:
+            data.setdefault("show", {}).setdefault("ids", {})[found_metadata_source] = str(found_metadata_source_identifier)
+        elif media_type == MediaTypes.EPISODE.value:
+            data.setdefault("episode", {}).setdefault("ids", {})[found_metadata_source] = str(found_metadata_source_identifier)
+        else:
+            warnings.append(f"Unrecognized media type for unresolved import: {unresolved}")
+            continue
+
+        try:
+            if process_unresolved_import_entry(media_type, user, unresolved.metadata_source, data, found_metadata_source):
+                unresolved.delete()
+                import_counts[media_type] += 1  # flat count for successful imports
+                logger.info("Successfully processed unresolved media: %s", unresolved)
+            else:
+                warnings.append(f"Failed to process unresolved media: {unresolved}")
+        except Exception as e:
+            warnings.append(f"Error processing {unresolved}: {e}")
+            logger.exception("Failed to reprocess %s", unresolved)
+
+    return import_counts, warnings
+
+
+def process_unresolved_import_entry(media_type, user, source, data, matched_source):
+    from integrations.imports.trakt import TraktImporter
+    """
+    Dispatches unresolved media to the appropriate importer.
+    Returns True if successfully processed.
+    """
+    importers = {
+       "trakt": TraktImporter,
+    }
+
+    if source not in importers:
+        logger.error("No importer available for source: %s", source)
+        return False
+
+    importer_class = importers[source]
+    importer = importer_class(user, user, mode="all")
+
+    try:
+        if source == "trakt":
+            if media_type == MediaTypes.MOVIE.value:
+                importer.process_watched_movie(data)
+            elif media_type in (MediaTypes.TV.value, MediaTypes.EPISODE.value):
+                logger.info((data, matched_source))
+                importer.process_watched_episode(data)
+            else:
+                return False
+        else:
+            return False
+        if importer.bulk_media:
+            bulk_create_media(importer.bulk_media, user)
+            importer.bulk_media = defaultdict(list)
+            return True
+        else:
+            return False
+    except Exception as e:
+        logger.exception("Error processing media via importer %s: %s", importer_class.__name__, e)
+        return False

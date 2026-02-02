@@ -1,9 +1,12 @@
 import requests
 from django.conf import settings
 from django.core.cache import cache
+from django.core.cache import cache
 from django.db import models
 from django.db.models import Prefetch, Q
 
+from app.models import Item, MediaTypes, Sources
+from app.providers import services
 from app.models import Item, MediaTypes, Sources
 from app.providers import services
 
