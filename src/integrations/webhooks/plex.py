@@ -116,7 +116,7 @@ class PlexWebhookProcessor(BaseWebhookProcessor):
             source = "tvdb_id" if ids.get("tvdb_id") else "imdb_id"
             try:
                 from app.providers import tmdb
-                find_results = tmdb.find(external_id, source=source)
+                find_results = tmdb.find(external_id, external_source=source)
                 
                 tmdb_id = None
                 if media_type == MediaTypes.TV.value:
