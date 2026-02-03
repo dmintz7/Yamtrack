@@ -16,7 +16,8 @@ from django_celery_beat.models import CrontabSchedule, PeriodicTask
 from simple_history.utils import bulk_create_with_history
 
 import app
-from app.models import MediaTypes
+from app.models import MediaTypes, ExternalID, MetadataSources
+from app.providers import tmdb
 from integrations.models import UnresolvedImport
 
 logger = logging.getLogger(__name__)
@@ -448,3 +449,26 @@ def process_unresolved_import_entry(media_type, user, source, data, matched_sour
     except Exception as e:
         logger.exception("Error processing media via importer %s: %s", importer_class.__name__, e)
         return False
+
+def bulk_create_external_ids(external_ids, batch_size=1000):
+    """Bulk create ExternalID objects with deduplication."""
+    if not external_ids:
+        return
+
+    # Deduplicate by (item_id, source, source_id)
+    seen = set()
+    unique_external_ids = []
+    for ext in external_ids:
+        key = (ext.item_id, ext.metadata_source.value, ext.metadata_source_identifier)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_external_ids.append(ext)
+
+    retry_on_lock(
+        lambda: ExternalID.objects.bulk_create(
+            unique_external_ids,
+            batch_size=batch_size,
+            ignore_conflicts=True,
+        )
+    )

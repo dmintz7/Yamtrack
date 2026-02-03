@@ -183,6 +183,8 @@ class TraktImporter:
 
         # Track bulk creation lists for each media type
         self.bulk_media = defaultdict(list)
+        self.external_ids = []
+        self.unresolved_imports = []
 
         # Track media instances being created
         self.media_instances = defaultdict(lambda: defaultdict(list))
@@ -203,7 +205,9 @@ class TraktImporter:
         helpers.cleanup_existing_media(self.to_delete, self.user)
         helpers.bulk_create_media(self.bulk_media, self.user)
 
+        helpers.bulk_create_external_ids(self.external_ids)
         helpers.bulk_create_unresolved(self.unresolved_imports)
+
         imported_counts = {
             media_type: len(media_list)
             for media_type, media_list in self.bulk_media.items()
@@ -402,6 +406,7 @@ class TraktImporter:
             return
 
         item = self._get_or_create_item(MediaTypes.MOVIE.value, tmdb_id, metadata)
+        self.queue_trakt_external_ids(movie.get("ids", {}), item)
         watched_at = entry["watched_at"]
 
         key = f"{tmdb_id}"
@@ -447,8 +452,6 @@ class TraktImporter:
             return
 
         # Extract episode data
-        season_number = entry["episode"]["season"]
-        episode_number = entry["episode"]["number"]
         season_number = episode["season"]
         episode_number = episode["number"]
 
@@ -488,6 +491,7 @@ class TraktImporter:
 
         # Create or get TV show
         tv_item = self._get_or_create_item(MediaTypes.TV.value, tmdb_id, tv_metadata)
+        self.queue_trakt_external_ids(show.get("ids", {}), tv_item)
         tv_key = f"{tmdb_id}"
 
         if tv_key not in self.media_instances[MediaTypes.TV.value]:
@@ -538,6 +542,7 @@ class TraktImporter:
         )
 
         ep_key = f"{tmdb_id}:{season_number}:{episode_number}"
+        self.queue_trakt_external_ids(episode.get("ids", {}), episode_item)
 
         episode_obj = app.models.Episode(
             item=episode_item,
@@ -803,3 +808,38 @@ class TraktImporter:
                 getattr(self.user, "username", "<unknown>"),
                 e,
             )
+
+    def queue_trakt_external_ids(self, ids_dict, item):
+        """Queue ExternalID objects for bulk creation with error handling."""
+        valid_sources = {choice.value for choice in MetadataSources}
+
+        for source_key, source_id in ids_dict.items():
+            try:
+                if source_key not in valid_sources or not source_id:
+                    continue
+
+                # Convert source to enum safely
+                source_enum = MetadataSources(source_key)
+
+                self.external_ids.append(
+                    ExternalID(
+                        item=item,
+                        metadata_source=source_enum,
+                        metadata_source_identifier=str(source_id),
+                    )
+                )
+            except ValueError:
+                # Happens if source_key is not a valid Sources enum
+                logger.warning(
+                    "Skipping invalid external metadata source '%s' for item %s",
+                    source_key,
+                    getattr(item, "id", "<unknown>"),
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to queue external ID %s:%s for item %s: %s",
+                    source_key,
+                    source_id,
+                    getattr(item, "id", "<unknown>"),
+                    e,
+                )
