@@ -9,7 +9,7 @@ from django.utils.dateparse import parse_datetime
 from django_celery_beat.models import PeriodicTask
 
 import app
-from app.models import MediaTypes, Sources, Status
+from app.models import MediaTypes, Sources, Status, ExternalID, MetadataSources
 from app.providers import services
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
@@ -172,6 +172,7 @@ class TraktImporter:
         self.user = user
         self.mode = mode
         self.refresh_token = refresh_token
+        self.base_url = TRAKT_API_BASE_URL
         self.user_base_url = f"{TRAKT_API_BASE_URL}/users/{username}"
         self.warnings = []
 
@@ -469,6 +470,20 @@ class TraktImporter:
             season_number,
         )
         if not season_metadata:
+            if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
+                self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
+                return
+
+            season_number = found_info["season_number"]
+            episode_number = found_info["episode_number"]
+            season_metadata = self._get_metadata(
+                MediaTypes.SEASON.value,
+                tmdb_id,
+                show["title"],
+                season_number,
+            )
+
+        if not season_metadata:
             self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
             return
 
@@ -476,6 +491,13 @@ class TraktImporter:
         episode_exists = any(
             ep["episode_number"] == episode_number for ep in season_metadata["episodes"]
         )
+        if not episode_exists:
+            if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
+                self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
+                return
+
+            episode_number = found_info["episode_number"]
+            episode_exists = any(ep["episode_number"] == episode_number for ep in season_metadata["episodes"])
 
         if not episode_exists:
             item_identifier = f"{show['title']} S{season_number}E{episode_number}"

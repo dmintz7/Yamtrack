@@ -4,12 +4,14 @@ import hashlib
 import json
 import logging
 import time
+from dateutil.parser import parse as parse_date
 from collections import defaultdict
 
 from cryptography.fernet import Fernet
 from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
+from django.core.cache import cache
 from django.db.utils import OperationalError
 from django.utils import timezone
 from django_celery_beat.models import CrontabSchedule, PeriodicTask
@@ -343,6 +345,143 @@ def encrypt(value):
 def decrypt(token):
     """Decrypt value that was encrypted with `encrypt`."""
     return fernet().decrypt(token.encode()).decode()
+
+
+class TMDBResolver:
+    def __init__(self, trakt_data, trakt_class):
+        self.trakt = trakt_class
+        self.trakt_data = trakt_data
+        self.trakt_episode_id = trakt_data["episode"]["ids"]["trakt"]
+        self.tvdb_episode_id = trakt_data["episode"]["ids"]["tvdb"]
+        self.tmdb_show_id = trakt_data["show"]["ids"]["tmdb"]
+        self.episode_title = trakt_data["episode"]["title"]
+        self.show_data = None
+
+    def resolve(self):
+        if not self.trakt_episode_id or not self.tmdb_show_id:
+            logger.warning("Missing TVDB episode ID or TMDB show ID")
+            return None
+
+        episode_airdate = self._fetch_tvdb_airdate()
+        if not episode_airdate:
+            episode_airdate = self._fetch_trakt_airdate()
+            logger.warning("Failed to fetch episode airdate from TVDB, Trying Trakt")
+            if not episode_airdate:
+                logger.warning("Failed to fetch episode airdate from Trakt")
+                return None
+
+        self.show_data = self._fetch_show_data()
+        if not self.show_data:
+            logger.warning("Failed to fetch show data from TMDB")
+            return None
+
+        season_number = self._match_season(episode_airdate)
+        if not season_number:
+            logger.warning("No matching season found for airdate %s", episode_airdate)
+            return None
+
+        matched_episode = self._match_episode(season_number, airdate=episode_airdate)
+        if matched_episode:
+            logger.info(f"Matched episode: Season {season_number} Episode {matched_episode.get('episode_number')} ({matched_episode.get('name')})")
+            return matched_episode
+
+        logger.warning(f"No matching episode found by airdate/title in season {season_number}")
+        return None
+
+    def _fetch_trakt_airdate(self):
+        """Fetch the airdate of an episode from Trakt using the episode ID."""
+        if not self.trakt_episode_id:
+            return None
+        cache_key = f"trakt_episode_airdate_{self.trakt_episode_id}"
+        try:
+            data = cache.get(cache_key)
+            if not data:
+                data = self.trakt._make_api_request(f"{self.trakt.base_url}/episodes/{self.trakt_episode_id}?extended=full")
+                cache.set(cache_key, data)
+        except Exception:
+            cache.set(cache_key, None)
+            return None
+
+        first_aired = data.get("first_aired")
+        if not first_aired:
+            return None
+
+        airdate = parse_date(first_aired)
+        return airdate.date() if airdate else None
+
+    def _fetch_tvdb_airdate(self):
+        if not self.tvdb_episode_id:
+            return None
+
+        cache_key = f"tvdb_episode_airdate_{self.tvdb_episode_id}"
+
+        try:
+            data = cache.get(cache_key)
+            if not data:
+                import requests
+                resp = requests.get(f"https://api.thetvdb.com/episodes/{self.tvdb_episode_id}")
+                if resp.status_code != 200:
+                    cache.set(cache_key, None)
+                    return None
+                data = resp.json().get("data")
+                cache.set(cache_key, data)
+        except Exception:
+            cache.set(cache_key, None)
+            return None
+
+        if not data:
+            return None
+
+        first_aired = data.get("firstAired")
+        if not first_aired:
+            return None
+
+        airdate = parse_date(first_aired)
+        return airdate.date() if airdate else None
+
+    def _fetch_show_data(self):
+        logger.debug("Fetching TMDB show data for show ID %s", self.tmdb_show_id)
+        return tmdb.tv(self.tmdb_show_id)
+
+    def _fetch_season_episodes(self, season_number):
+        logger.debug("Fetching episodes for season %s of show %s", season_number, self.tmdb_show_id)
+        resp = tmdb.tv_with_seasons(self.tmdb_show_id, [season_number])
+        episodes = resp.get(f"season/{season_number}", []).get("episodes", [])
+        return episodes
+
+    def _match_season(self, episode_airdate):
+        seasons = self.show_data.get("related", []).get("seasons", [])
+        for season in reversed(seasons):
+            season_number = season["season_number"]
+            first_air = season.get("first_air_date")
+            if not first_air:
+                continue
+            first_air_date = first_air.date()
+            if first_air_date <= episode_airdate:
+                logger.debug("Matched season %s (first air date %s)", season_number, first_air_date)
+                return season_number
+        return None
+
+    def _match_episode(self, season_number, airdate=None, title=None):
+        episodes = self._fetch_season_episodes(season_number)
+
+        if airdate:
+            for ep in episodes:
+                if ep.get("air_date") and parse_date(ep["air_date"]).date() == airdate:
+                    logger.debug("Found episode by airdate: %s", ep.get("name"))
+                    return ep
+
+        if title:
+            title_norm = title.lower()
+            for ep in episodes:
+                ep_title = ep.get("name", "").lower()
+                if ep_title == title_norm:
+                    logger.debug("Found episode by title: %s", ep.get("name"))
+                    return ep
+
+        logger.debug("No episode matched for season %s", season_number)
+        return None
+
 
 def bulk_create_unresolved(unresolved, batch_size=500):
     """Bulk create UnresolvedImport objects with deduplication."""
