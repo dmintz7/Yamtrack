@@ -3,6 +3,7 @@
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+from app.models import MediaTypes
 
 
 class PlexAccount(models.Model):
