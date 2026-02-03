@@ -499,15 +499,46 @@ def bulk_create_unresolved(unresolved, batch_size=500):
         seen.add(key)
         unique_unresolved.append(entry)
 
-    retry_on_lock(
-        lambda: UnresolvedImport.objects.bulk_create(
-            unique_unresolved,
-            batch_size=batch_size,
-            ignore_conflicts=True,
+    keys_to_check = [
+        (u.user_id, u.metadata_source, u.metadata_source_identifier, u.media_type)
+        for u in unique_unresolved
+    ]
+
+    existing_keys = set(
+        UnresolvedImport.objects.filter(
+            user_id__in={k[0] for k in keys_to_check},
+            metadata_source__in={k[1] for k in keys_to_check},
+            media_type__in={k[3] for k in keys_to_check},
+        ).values_list(
+            "user_id",
+            "metadata_source",
+            "metadata_source_identifier",
+            "media_type",
         )
     )
 
-    logger.info(f"Finished creating {len(unique_unresolved)} unresolved entries in batches of {batch_size}.")
+    to_create = []
+    conflicts = []
+
+    for entry in unique_unresolved:
+        key = (entry.user_id, entry.metadata_source, entry.metadata_source_identifier, entry.media_type)
+        if key in existing_keys:
+            conflicts.append(entry)
+        else:
+            to_create.append(entry)
+
+    logger.info(f"Detected {len(conflicts)} conflicts before insert.")
+
+    # Insert non-conflicting entries in bulk
+    if to_create:
+        retry_on_lock(
+            lambda: UnresolvedImport.objects.bulk_create(
+                to_create,
+                batch_size=batch_size,
+            )
+        )
+
+    logger.info(f"Finished creating {len(to_create)} new unresolved entries in batches of {batch_size}.")
 
 
 def initiate_unresolved_import(user):
