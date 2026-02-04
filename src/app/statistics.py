@@ -1373,8 +1373,8 @@ def _get_season_metadata_with_episodes(media, season, logger):
         episodes_in_db = season.episodes.all()
 
         # Process episodes through TMDB to get runtime data
-        from app.providers import tmdb
-        season_metadata["episodes"] = tmdb.process_episodes(
+        from app.providers import get_tv_provider
+        season_metadata["episodes"] = get_tv_provider(media.item.source).process_episodes(
             season_metadata,
             episodes_in_db,
         )

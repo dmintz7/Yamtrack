@@ -41,6 +41,7 @@ class Sources(models.TextChoices):
     """Choices for the source of the item."""
 
     TMDB = "tmdb", "The Movie Database"
+    TVDB = "tvdb", "Skyhook (TVDB Mirror)"
     MAL = "mal", "MyAnimeList"
     MANGAUPDATES = "mangaupdates", "MangaUpdates"
     IGDB = "igdb", "Internet Game Database"
@@ -2355,7 +2356,7 @@ class Season(Media):
 
             item, _ = Item.objects.get_or_create(
                 media_id=self.item.media_id,
-                source=Sources.TMDB.value,
+                source=self.item.source,
                 media_type=MediaTypes.TV.value,
                 defaults={
                     "title": tv_metadata["title"],
