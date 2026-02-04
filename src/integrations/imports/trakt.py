@@ -386,8 +386,14 @@ class TraktImporter:
     def process_watched_movie(self, entry):
         """Process a single movie watch event."""
         movie = entry["movie"]
-        tmdb_id = self._get_tmdb_id(movie)
-        if not tmdb_id:
+        metadata, source_key, source_id = app.helpers.get_metadata_by_priority(
+            MediaTypes.MOVIE.value,
+            movie.get("ids", {}),
+            movie["title"],
+        )
+
+        if not metadata:
+            self.queue_unresolved_media("trakt", movie.get("ids", {}).get("trakt"), MediaTypes.MOVIE.value, entry, )
             return
 
         # Check if we should process this movie based on mode
@@ -401,13 +407,9 @@ class TraktImporter:
         ):
             return
 
-        metadata = self._get_metadata(MediaTypes.MOVIE.value, tmdb_id, movie["title"])
-        if not metadata:
-            self.queue_unresolved_media("trakt", movie.get("ids", {}).get("trakt"), MediaTypes.MOVIE.value, entry,)
-            return
-
-        item = self._get_or_create_item(MediaTypes.MOVIE.value, tmdb_id, metadata)
+        item = self._get_or_create_item(MediaTypes.MOVIE.value, source_key, source_id, metadata)
         self.queue_trakt_external_ids(movie.get("ids", {}), item)
+
         watched_at = entry["watched_at"]
 
         key = f"{tmdb_id}"
@@ -433,11 +435,10 @@ class TraktImporter:
         return settings.IMG_NONE
 
     def process_watched_episode(self, entry):
-        """Process a single episode watch event."""
-        show = entry["show"]
-        episode = entry["episode"]
-        tmdb_id = self._get_tmdb_id(show)
-        if not tmdb_id:
+        """Process a single episode watch event with source priority."""
+        show = entry.get("show")
+        episode = entry.get("episode")
+        if not show or not episode:
             self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
             return
 
@@ -562,10 +563,8 @@ class TraktImporter:
             season_number,
             episode_number,
         )
-
-        ep_key = f"{tmdb_id}:{season_number}:{episode_number}"
+        ep_key = f"{source_id}:{season_number}:{episode_number}"
         self.queue_trakt_external_ids(episode.get("ids", {}), episode_item)
-
         episode_obj = app.models.Episode(
             item=episode_item,
             related_season=season_obj,
