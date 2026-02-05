@@ -17,7 +17,7 @@ from integrations.imports.helpers import MediaImportError, MediaImportUnexpected
 logger = logging.getLogger(__name__)
 
 TRAKT_API_BASE_URL = "https://api.trakt.tv"
-BULK_PAGE_SIZE = 1000
+BULK_PAGE_SIZE = settings.TRAKT_BULK_PAGE_SIZE
 
 
 def handle_oauth_callback(request, redirect_uri=None, client_id=None, client_secret=None):

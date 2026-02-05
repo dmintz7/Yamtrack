@@ -7,65 +7,20 @@ import model_utils.fields
 import simple_history.models
 from django.conf import settings
 from django.db import migrations, models
+from django.db.utils import OperationalError
 
-
-def _table_exists(schema_editor, table_name: str) -> bool:
-    with schema_editor.connection.cursor() as cursor:
-        introspection = schema_editor.connection.introspection
-        if hasattr(introspection, "table_names"):
-            table_names = introspection.table_names(cursor)
-        else:
-            table_names = [table.name for table in introspection.get_table_list(cursor)]
-    return table_name in table_names
-
-
-def _column_exists(schema_editor, table_name: str, column_name: str) -> bool:
-    with schema_editor.connection.cursor() as cursor:
-        try:
-            description = schema_editor.connection.introspection.get_table_description(
-                cursor, table_name
-            )
-        except Exception:
-            return False
-    columns = {getattr(column, "name", column[0]) for column in description}
-    return column_name in columns
-
-
-class CreateModelIfNotExists(migrations.CreateModel):
-    """CreateModel that skips if the table already exists."""
-
-    def database_forwards(self, app_label, schema_editor, from_state, to_state):
-        model = to_state.apps.get_model(app_label, self.name)
-        table_name = model._meta.db_table
-        if _table_exists(schema_editor, table_name):
-            return
-
-        super().database_forwards(app_label, schema_editor, from_state, to_state)
-
-
-class AddFieldIfNotExists(migrations.AddField):
-    """AddField that skips if column already exists."""
-
-    def database_forwards(self, app_label, schema_editor, from_state, to_state):
-        model = to_state.apps.get_model(app_label, self.model_name)
-        field = model._meta.get_field(self.name)
-        table_name = model._meta.db_table
-        column_name = field.column
-        if _column_exists(schema_editor, table_name, column_name):
-            return
-
-        super().database_forwards(app_label, schema_editor, from_state, to_state)
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
         ('app', '0052_alter_item_title'),
-        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
-        CreateModelIfNotExists(
+        migrations.DeleteModel(name='BoardGame',),
+        migrations.DeleteModel(name='HistoricalBoardGame',),
+        migrations.CreateModel(
             name='BoardGame',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
@@ -83,7 +38,7 @@ class Migration(migrations.Migration):
                 'abstract': False,
             },
         ),
-        CreateModelIfNotExists(
+        migrations.CreateModel(
             name='HistoricalBoardGame',
             fields=[
                 ('id', models.BigIntegerField(auto_created=True, blank=True, db_index=True, verbose_name='ID')),
@@ -132,17 +87,17 @@ class Migration(migrations.Migration):
             model_name='item',
             constraint=models.CheckConstraint(condition=models.Q(('media_type__in', ['tv', 'season', 'episode', 'movie', 'anime', 'manga', 'game', 'book', 'comic', 'boardgame', 'music', 'podcast'])), name='app_item_media_type_valid'),
         ),
-        AddFieldIfNotExists(
+        migrations.AddField(
             model_name='boardgame',
             name='item',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to='app.item'),
         ),
-        AddFieldIfNotExists(
+        migrations.AddField(
             model_name='boardgame',
             name='user',
             field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, to=settings.AUTH_USER_MODEL),
         ),
-        AddFieldIfNotExists(
+        migrations.AddField(
             model_name='historicalboardgame',
             name='history_user',
             field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to=settings.AUTH_USER_MODEL),
