@@ -882,3 +882,23 @@ class TraktImporter:
                     getattr(item, "id", "<unknown>"),
                     e,
                 )
+
+    def get_metadata_by_priority(self, media_type, source_ids: dict, title, season_number=None, source_found=None):
+        """
+        Try metadata providers in priority order.
+        source_ids = {"tmdb": "123", "tvdb": "456"}
+        """
+
+        from app.config import get_property
+        for source in get_property(media_type, "sources"):
+            if source_found is not None and source_found != source.value:
+                continue
+            source_key = source.value
+            source_id = source_ids.get(source_key)
+            if not source_id:
+                continue
+
+            metadata = self._get_metadata(media_type, source_key, source_id, title, season_number)
+            return metadata, source, source_id
+
+        return None, None,None
