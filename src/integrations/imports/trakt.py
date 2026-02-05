@@ -385,7 +385,7 @@ class TraktImporter:
     def process_watched_movie(self, entry):
         """Process a single movie watch event."""
         movie = entry["movie"]
-        metadata, source_key, source_id = app.helpers.get_metadata_by_priority(
+        metadata, source, source_id = self.get_metadata_by_priority(
             MediaTypes.MOVIE.value,
             movie.get("ids", {}),
             movie["title"],
@@ -407,7 +407,7 @@ class TraktImporter:
         ):
             return
 
-        item = self._get_or_create_item(MediaTypes.MOVIE.value, source_key, source_id, metadata)
+        item = self._get_or_create_item(MediaTypes.MOVIE.value, source.value, source_id, metadata)
         self.queue_trakt_external_ids(movie.get("ids", {}), item)
 
         watched_at = entry["watched_at"]
@@ -445,18 +445,12 @@ class TraktImporter:
             return
 
         # --- Get metadata by priority for the show ---
-        tv_metadata, source_key, source_id = app.helpers.get_metadata_by_priority(
+        tv_metadata, source, source_id = self.get_metadata_by_priority(
             MediaTypes.TV.value,
             show.get("ids", {}),
             show.get("title"),
         )
-        if not tv_metadata or not source_key or not source_id:
-            self.queue_unresolved_media(
-                "trakt",
-                episode.get("ids", {}).get("trakt"),
-                MediaTypes.EPISODE.value,
-                entry,
-            )
+        if not tv_metadata or not source.value or not source_id:
             message = f"{show['title']}: not found in {source.label} with ID {source_id}."
             self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
             return
@@ -466,7 +460,7 @@ class TraktImporter:
                 self.existing_media,
                 self.to_delete,
                 MediaTypes.TV.value,
-                source_key,
+                source.value,
                 source_id,
                 self.mode,
         ):
@@ -475,7 +469,7 @@ class TraktImporter:
         # --- Extract episode info ---
         season_number = episode.get("season")
         episode_number = episode.get("number")
-        episode_media_id = episode.get("ids", {}).get(source_key)
+        episode_media_id = episode.get("ids", {}).get(source.value)
         episode_by_id = None
 
         if episode_media_id and tv_metadata.get("related", {}).get("episodes"):
@@ -489,7 +483,7 @@ class TraktImporter:
                 episode_number = episode_by_id.get("episode_number", episode_number)
 
         # --- Get season metadata using priority ---
-        season_metadata, season_source_key, season_source_id = app.helpers.get_metadata_by_priority(
+        season_metadata, season_source, season_source_id = self.get_metadata_by_priority(
             MediaTypes.SEASON.value,
             show.get("ids", {}),
             show.get("title"),
@@ -503,7 +497,7 @@ class TraktImporter:
 
             season_number = found_info["season_number"]
             episode_number = found_info["episode_number"]
-            season_metadata, season_source_key, season_source_id = app.helpers.get_metadata_by_priority(
+            season_metadata, season_source, season_source_id = self.get_metadata_by_priority(
                 MediaTypes.SEASON.value,
                 show.get("ids", {}),
                 show.get("title"),
@@ -542,7 +536,7 @@ class TraktImporter:
         watched_at = entry.get("watched_at")
 
         # --- Create or get TV show item ---
-        tv_item = self._get_or_create_item(MediaTypes.TV.value, source_key, source_id, tv_metadata)
+        tv_item = self._get_or_create_item(MediaTypes.TV.value, source.value, source_id, tv_metadata)
         self.queue_trakt_external_ids(show.get("ids", {}), tv_item)
         tv_key = f"{source_id}"
         if tv_key not in self.media_instances[MediaTypes.TV.value]:
@@ -728,13 +722,13 @@ class TraktImporter:
             season_number=None,
     ):
         """Process media items for watchlist, ratings, and comments."""
-        metadata, source_key, source_id = self.get_metadata_by_priority(
+        metadata, source, source_id = self.get_metadata_by_priority(
             media_type,
             media_data.get("ids", {}),
             media_data.get("title"),
             season_number=season_number,
         )
-        if not metadata or not source_key or not source_id:
+        if not metadata or not source.value or not source_id:
             return
 
         parent_type = (
@@ -744,7 +738,7 @@ class TraktImporter:
             self.existing_media,
             self.to_delete,
             parent_type,
-            source_key,
+            source.value,
             source_id,
             self.mode,
         ):
@@ -757,7 +751,7 @@ class TraktImporter:
         )
 
         if media_type == MediaTypes.SEASON.value:
-            tv_obj = self._get_tv_obj(source_id, source_key, media_data, updated_at)
+            tv_obj = self._get_tv_obj(source_id, source.value, media_data, updated_at)
             if not tv_obj:
                 return
             defaults["related_tv"] = tv_obj
@@ -767,7 +761,7 @@ class TraktImporter:
         if media_type == MediaTypes.SEASON.value:
             key = f"{key}:{season_number}"
 
-        item = self._get_or_create_item(media_type, source_key, source_id, metadata, season_number)
+        item = self._get_or_create_item(media_type, source.value, source_id, metadata, season_number)
 
         if key in self.media_instances[media_type]:
             self._update_instance(media_type, key, defaults)
