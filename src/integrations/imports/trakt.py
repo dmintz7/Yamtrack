@@ -326,6 +326,11 @@ class TraktImporter:
                 source_key,
                 **kwargs,
             )
+        except KeyError as e:
+            if 'season/' in e.args[0]:
+                logger.debug(f"Ignoring unknown season {e.args[0]} for {source_key} {source_id} {title}")
+                return None
+            raise
         except services.ProviderAPIError as error:
             if error.status_code == requests.codes.not_found:
                 return None
