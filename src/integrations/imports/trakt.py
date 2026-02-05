@@ -313,19 +313,6 @@ class TraktImporter:
                 msg = f"Error processing history entry: {entry}"
                 raise MediaImportUnexpectedError(msg) from e
 
-    def _get_provider_id(self, entry_data: dict, provider_key) -> str | None:
-        """Extract the provider ID (e.g., TMDB) from entry data."""
-        ids = entry_data.get("ids", {})
-
-        provider_id = ids.get(provider_key)
-        if provider_id:
-            return str(provider_id)
-
-        self.warnings.append(
-            f"{entry_data['title']}: No {Sources(provider_key).label} ID found.",
-        )
-        return None
-
     def _get_metadata(self, media_type, source_key, source_id, title, season_number=None):
         """Get metadata for a media item."""
         try:
