@@ -423,7 +423,6 @@ def get_season_data(data):
                     season_eps,
                     key=lambda e: e.get("episodeNumber") or 0
                 )
-                logger.info(season_eps_sorted[0])
                 first_air = parse_episode_date(
                     season_eps_sorted[0].get("airDateUtc")
                 )
