@@ -341,11 +341,6 @@ class TraktImporter:
             )
         except services.ProviderAPIError as error:
             if error.status_code == requests.codes.not_found:
-                if media_type == MediaTypes.SEASON.value:
-                    title = f"{title} S{season_number}"
-                self.warnings.append(
-                    f"{title}: not found in {Sources(source_key).label} with ID {source_id}.",
-                )
                 return None
             raise
 
