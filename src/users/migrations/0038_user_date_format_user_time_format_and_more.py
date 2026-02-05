@@ -43,9 +43,9 @@ class Migration(migrations.Migration):
                 max_length=20,
             ),
         ),
-        migrations.RunPython(
-            drop_home_sort_constraint_if_exists,
-            migrations.RunPython.noop,
+        migrations.RunSQL(
+            sql="ALTER TABLE users_user DROP CONSTRAINT IF EXISTS home_sort_valid;",
+            reverse_sql=migrations.RunSQL.noop,
         ),
         migrations.AddConstraint(
             model_name="user",
