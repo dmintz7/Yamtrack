@@ -7,7 +7,7 @@ from django.core.cache import cache
 logger = logging.getLogger(__name__)
 
 
-TIME_LEFT_CACHE_PREFIX = "time_left_sorted_v13"
+TIME_LEFT_CACHE_PREFIX = "time_left_sorted_v15"
 _REGISTRY_TEMPLATE = f"{TIME_LEFT_CACHE_PREFIX}_registry_{{user_id}}"
 
 
@@ -19,6 +19,13 @@ def build_time_left_cache_key(
     direction: str,
     rating_filter: str,
     collection_filter: str = "",
+    genre_filter: str = "",
+    year_filter: str = "",
+    source_filter: str = "",
+    language_filter: str = "",
+    country_filter: str = "",
+    platform_filter: str = "",
+    origin_filter: str = "",
 ) -> str:
     """Create the cache key used for time-left sorted TV lists."""
     normalized_status = status_filter or ""
@@ -26,9 +33,18 @@ def build_time_left_cache_key(
     normalized_direction = direction or ""
     normalized_rating = rating_filter or ""
     normalized_collection = collection_filter or ""
+    normalized_genre = genre_filter or ""
+    normalized_year = year_filter or ""
+    normalized_source = source_filter or ""
+    normalized_language = language_filter or ""
+    normalized_country = country_filter or ""
+    normalized_platform = platform_filter or ""
+    normalized_origin = origin_filter or ""
     return (
         f"{TIME_LEFT_CACHE_PREFIX}_{user_id}_{media_type}_{normalized_status}_"
-        f"{normalized_query}_{normalized_direction}_{normalized_rating}_{normalized_collection}"
+        f"{normalized_query}_{normalized_direction}_{normalized_rating}_{normalized_collection}_"
+        f"{normalized_genre}_{normalized_year}_{normalized_source}_"
+        f"{normalized_language}_{normalized_country}_{normalized_platform}_{normalized_origin}"
     )
 
 

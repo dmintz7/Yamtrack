@@ -250,13 +250,16 @@
             <div class="font-medium text-gray-400 mb-1">YOUR NOTES</div>
           </div>
 
-          {% with notes_modal_id=notes_entry.id|stringformat:"s"|add:"-notes" %}
-            <div x-data="{ isExpanded: false, isClamped: false, trackOpen: false, checkClamp() { const element = this.$refs.notesText; this.isClamped = element.scrollHeight > element.clientHeight; } }"
+          {% with notes_modal_id=notes_entry.id|stringformat:"s"|add:"-notes" notes_content_id=notes_entry.id|stringformat:"s"|add:"-notes-content" %}
+            {{ notes_entry.notes|json_script:notes_content_id }}
+            <div x-data="{ isExpanded: false, isClamped: false, trackOpen: false, checkClamp() { const element = this.$refs.notesPreview; this.isClamped = element.scrollHeight > element.clientHeight; } }"
                  x-init="$nextTick(() => checkClamp())">
-              <p x-ref="notesText"
-                 :class="isExpanded ? '' : 'line-clamp-2'"
-                 class="text-gray-300 italic">"{{ notes_entry.notes|linebreaksbr }}"</p>
-              <div class="flex items-center gap-2 mt-1">
+              <div x-ref="notesPreview"
+                   data-markdown-preview
+                   data-markdown-source="{{ notes_content_id }}"
+                   :class="isExpanded ? 'max-h-72 overflow-y-auto' : 'max-h-20 overflow-hidden'"
+                   class="text-gray-200 rounded-md border border-gray-700 bg-[#2a2f35] p-3 text-sm"></div>
+              <div class="flex items-center gap-2 mt-2">
                 <button x-show="isClamped"
                         @click="isExpanded = !isExpanded"
                         class="text-indigo-400 hover:text-indigo-300 text-xs focus:outline-none transition-colors cursor-pointer inline-flex items-center gap-1">
@@ -356,7 +359,7 @@
 
         {# User score - mobile: order-4 (row 2, col 1), desktop: order-2 #}
         {% if user_medias and current_instance and not public_view|default:False %}
-          <div x-data="{ showRatingPopup: false, rating: {{ current_instance.score|default:'null' }}, hoverRating: null, isHovering: false }"
+          <div x-data="{ showRatingPopup: false, rating: {{ current_instance.score|score_display:user|default:'null' }}, hoverRating: null, isHovering: false }"
                class="relative" data-mobile-order="4" data-desktop-order="2">
             <!-- Rating display -->
             <div @click="showRatingPopup = !showRatingPopup"
@@ -367,7 +370,7 @@
                 <template x-if="rating">
                   <div class="flex items-baseline">
                     <span class="text-lg font-bold text-white" x-text="rating"></span>
-                    <span class="text-gray-400 ml-0.5 text-sm">/10</span>
+                    <span class="text-gray-400 ml-0.5 text-sm">/{{ user|rating_scale_max }}</span>
                   </div>
                 </template>
                 <template x-if="!rating">
@@ -384,13 +387,13 @@
                  @mouseenter="isHovering = true"
                  @mouseleave="isHovering = false; hoverRating = null">
               <div class="flex justify-between mb-1">
-                {% with rating_range=10|get_range %}
+                {% with rating_range=user|rating_scale_max|get_range %}
                   {% for rating_value in rating_range %}
-                    <button @click="rating = {{ rating_value }}; showRatingPopup = false; isHovering = false"
+                    <button @click="if (rating === {{ rating_value }}) { rating = null; } else { rating = {{ rating_value }}; } showRatingPopup = false; isHovering = false"
                             @mouseenter="hoverRating = {{ rating_value }}"
                             hx-post="{% url 'update_media_score' media_type current_instance.id %}"
                             hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
-                            hx-vals='{"score": {{ rating_value }} }'
+                            hx-vals='{"score": {{ rating_value }}, "toggle": true }'
                             hx-trigger="click"
                             hx-swap="none"
                             class="focus:outline-none flex flex-col items-center cursor-pointer">
@@ -519,7 +522,7 @@
                           {% include "app/icons/star.svg" with classes="w-4 h-4 mr-2 text-gray-400 fill-gray-400" %}
                         {% endif %}
                         {% if user_media.score %}
-                          <span class="text-sm font-medium text-gray-300">{{ user_media.score }}</span>
+                          <span class="text-sm font-medium text-gray-300">{{ user_media.score|score_display:user }}</span>
                         {% else %}
                           <span class="text-sm font-medium text-gray-400">Not rated</span>
                         {% endif %}
@@ -568,21 +571,26 @@
                       {% endif %}
 
                       {% if user_media.notes %}
-                        <div class="flex items-start mt-3"
-                             x-data="{ isExpanded:false, isClamped:false, measure(){ const el = this.$refs.notesText; this.isClamped = el.scrollHeight > el.clientHeight }, rafMeasure(){ requestAnimationFrame(() => this.measure()) }, reset(){ this.isExpanded = false; this.$nextTick(() => this.rafMeasure()) } }"
-                             x-init="rafMeasure(); $watch('showRepeats', v => { if (v) reset() })">
-                          {% include "app/icons/page-empty.svg" with classes="w-3 h-3 mr-1 text-yellow-400 shrink-0 mt-0.5" %}
-                          <div class="flex-1">
-                            <p x-ref="notesText"
-                               :class="isExpanded ? '' : 'line-clamp-2'"
-                               class="text-xs text-gray-300 italic">"{{ user_media.notes|linebreaksbr }}"</p>
-                            <button x-show="isClamped"
-                                    @click="isExpanded = !isExpanded"
-                                    class="text-indigo-400 hover:text-indigo-300 text-xs mt-1 focus:outline-none transition-colors cursor-pointer">
-                              <span x-text="isExpanded ? 'Show less' : 'Read more'"></span>
-                            </button>
+                        {% with user_notes_id=user_media.id|stringformat:"s"|add:"-notes-preview" %}
+                          {{ user_media.notes|json_script:user_notes_id }}
+                          <div class="flex items-start mt-3"
+                               x-data="{ isExpanded:false, isClamped:false, measure(){ const el = this.$refs.notesPreview; this.isClamped = el.scrollHeight > el.clientHeight }, rafMeasure(){ requestAnimationFrame(() => this.measure()) }, reset(){ this.isExpanded = false; this.$nextTick(() => this.rafMeasure()) } }"
+                               x-init="rafMeasure(); $watch('showRepeats', v => { if (v) reset() })">
+                            {% include "app/icons/page-empty.svg" with classes="w-3 h-3 mr-1 text-yellow-400 shrink-0 mt-0.5" %}
+                            <div class="flex-1">
+                              <div x-ref="notesPreview"
+                                   data-markdown-preview
+                                   data-markdown-source="{{ user_notes_id }}"
+                                   :class="isExpanded ? 'max-h-60 overflow-y-auto' : 'max-h-20 overflow-hidden'"
+                                   class="text-xs text-gray-200 rounded-md border border-gray-700 bg-[#2a2f35] p-2"></div>
+                              <button x-show="isClamped"
+                                      @click="isExpanded = !isExpanded"
+                                      class="text-indigo-400 hover:text-indigo-300 text-xs mt-1 focus:outline-none transition-colors cursor-pointer">
+                                <span x-text="isExpanded ? 'Show less' : 'Read more'"></span>
+                              </button>
+                            </div>
                           </div>
-                        </div>
+                        {% endwith %}
                       {% endif %}
                     </div>
                   </div>

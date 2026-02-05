@@ -12,7 +12,9 @@ from app.models import (
     Manga,
     Movie,
     Season,
+    Status,
 )
+from lists.models import CustomList, CustomListItem
 from integrations.imports import (
     yamtrack,
 )
@@ -160,3 +162,53 @@ class ImportYamtrackPartials(TestCase):
         )
 
 
+class ImportYamtrackLists(TestCase):
+    """Test importing yamtrack lists and list items."""
+
+    def setUp(self):
+        """Create user for the tests."""
+        self.credentials = {"username": "test", "password": "12345"}
+        self.user = get_user_model().objects.create_user(**self.credentials)
+        with Path(mock_path / "import_yamtrack_with_lists.csv").open("rb") as file:
+            self.import_results = yamtrack.importer(file, self.user, "new")
+
+    def test_list_created(self):
+        """Ensure list rows create lists."""
+        custom_list = CustomList.objects.filter(owner=self.user, name="Favorites").first()
+        self.assertIsNotNone(custom_list)
+        self.assertEqual(custom_list.description, "Top picks")
+        self.assertEqual(custom_list.tags, ["tag1", "tag2"])
+
+    def test_list_item_created(self):
+        """Ensure list item rows create list items without tracking media."""
+        custom_list = CustomList.objects.get(owner=self.user, name="Favorites")
+        self.assertEqual(CustomListItem.objects.filter(custom_list=custom_list).count(), 1)
+        self.assertEqual(
+            CustomListItem.objects.filter(custom_list=custom_list).first().item.title,
+            "Manual Book",
+        )
+
+    def test_list_item_does_not_track_media(self):
+        """List items should not create tracked media entries."""
+        self.assertEqual(Book.objects.filter(user=self.user).count(), 0)
+
+
+class ImportYamtrackStatusNormalization(TestCase):
+    """Test status normalization during Yamtrack import."""
+
+    def setUp(self):
+        """Create user for the tests."""
+        self.credentials = {"username": "test", "password": "12345"}
+        self.user = get_user_model().objects.create_user(**self.credentials)
+        with Path(mock_path / "import_yamtrack_status_normalization.csv").open("rb") as file:
+            self.import_results = yamtrack.importer(file, self.user, "new")
+
+    def test_status_values_are_normalized(self):
+        """Ensure status values are normalized to Status choices."""
+        tv = TV.objects.filter(user=self.user).first()
+        season = Season.objects.filter(user=self.user).first()
+
+        self.assertIsNotNone(tv)
+        self.assertIsNotNone(season)
+        self.assertEqual(tv.status, Status.COMPLETED.value)
+        self.assertEqual(season.status, Status.IN_PROGRESS.value)
