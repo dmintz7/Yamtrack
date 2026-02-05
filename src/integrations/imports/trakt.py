@@ -834,19 +834,9 @@ class TraktImporter:
                 )
             )
         except ValueError:
-            logger.warning(
-                "Skipping unresolved media with invalid source '%s' for user %s",
-                metadata_source,
-                getattr(self.user, "username", "<unknown>"),
-            )
+            logger.warning(f"Skipping unresolved media with invalid source '{metadata_source}' for user {getattr(self.user, 'username', '<unknown>')}")
         except Exception as e:
-            logger.exception(
-                "Failed to queue unresolved media %s:%s for user %s: %s",
-                metadata_source,
-                metadata_source_identifier,
-                getattr(self.user, "username", "<unknown>"),
-                e,
-            )
+            logger.exception(f"Failed to queue unresolved media {metadata_source}:{metadata_source_identifier} for user {getattr(self.user, 'username', '<unknown>')}: {e}")
 
     def queue_trakt_external_ids(self, ids_dict, item):
         """Queue ExternalID objects for bulk creation with error handling."""
