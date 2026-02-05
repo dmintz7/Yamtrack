@@ -392,7 +392,8 @@ class TraktImporter:
         )
 
         if not metadata:
-            self.queue_unresolved_media("trakt", movie.get("ids", {}).get("trakt"), MediaTypes.MOVIE.value, entry, )
+            message = f"{movie['title']}: not found in {source.label} with ID {source_id}."
+            self.queue_unresolved_media("trakt", movie.get("ids", {}).get("trakt"), MediaTypes.MOVIE.value, entry, message)
             return
 
         # Check if we should process this movie based on mode
@@ -456,6 +457,8 @@ class TraktImporter:
                 MediaTypes.EPISODE.value,
                 entry,
             )
+            message = f"{show['title']}: not found in {source.label} with ID {source_id}."
+            self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
             return
 
         # --- Check if we should process based on mode ---
@@ -494,7 +497,8 @@ class TraktImporter:
         )
         if not season_metadata:
             if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
-                self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
+                message = f"{show['title']} S{season_number}: not found in {source.label} with ID {source_id}."
+                self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
                 return
 
             season_number = found_info["season_number"]
@@ -507,7 +511,8 @@ class TraktImporter:
             )
 
         if not season_metadata:
-            self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
+            message = f"{show['title']} S{season_number}: not found in {source.label} with ID {source_id}."
+            self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
             return
 
         # --- Validate episode exists ---
@@ -520,7 +525,8 @@ class TraktImporter:
 
         if not episode_exists:
             if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
-                self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
+                message = f"{show['title']} S{season_number}E{episode_number}: not found in {source.label} with ID {source_id}."
+                self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
                 return
             episode_number = found_info["episode_number"]
             episode_exists = any(
@@ -528,11 +534,8 @@ class TraktImporter:
             )
 
         if not episode_exists:
-            item_identifier = f"{show['title']} S{season_number}E{episode_number}"
-            self.warnings.append(
-                f"{item_identifier}: not found in {source_key} with ID {source_id}."
-            )
-            self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, )
+            message = f"{show['title']} S{season_number}E{episode_number}: not found in {source.label} with ID {source_id}."
+            self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
             return
 
         episode_image = self._get_episode_image(episode_number, season_metadata)
@@ -725,7 +728,7 @@ class TraktImporter:
             season_number=None,
     ):
         """Process media items for watchlist, ratings, and comments."""
-        metadata, source_key, source_id = app.helpers.get_metadata_by_priority(
+        metadata, source_key, source_id = self.get_metadata_by_priority(
             media_type,
             media_data.get("ids", {}),
             media_data.get("title"),
@@ -818,11 +821,15 @@ class TraktImporter:
             for attr, value in defaults.items():
                 setattr(media_obj, attr, value)
 
-    def queue_unresolved_media(self, metadata_source, metadata_source_identifier, media_type, raw_entry):
-        """Queue unresolved media with error handling."""
+    def queue_unresolved_media(self, metadata_source, metadata_source_identifier, media_type, raw_entry, warning_message=None):
+        """Queue unresolved media and optionally record warning."""
         if not metadata_source_identifier:
             return
 
+        if warning_message is None:
+            warning_message = f"{media_type} {metadata_source_identifier} unresolved from {metadata_source}"
+
+        self.warnings.append(warning_message)
         try:
             self.unresolved_imports.append(
                 UnresolvedImport(
