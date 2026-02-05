@@ -85,6 +85,8 @@ SpecialModels = [
     "PodcastEpisode",
     "MetadataBackfillState",
     "CollectionEntry",
+    "ExternalID",
+    "UnresolvedImport"
 ]
 for model in app_models:
     if (
@@ -189,3 +191,22 @@ class CollectionEntryAdmin(admin.ModelAdmin):
 from app.models import CollectionEntry  # noqa: E402
 
 admin.site.register(CollectionEntry, CollectionEntryAdmin)
+
+
+class UnresolvedImportAdmin(admin.ModelAdmin):
+    list_display = ["user", "media_type", "metadata_source", "metadata_source_identifier", "found_metadata_source", "found_metadata_source_identifier"]
+    search_fields = ["media_type", "metadata_source", "metadata_source_identifier"]
+
+from integrations.models import UnresolvedImport  # noqa: E402
+
+admin.site.register(UnresolvedImport, UnresolvedImportAdmin)
+
+
+class ExternalIdAdmin(admin.ModelAdmin):
+    list_display = ("item", "metadata_source", "metadata_source_identifier", "created_at")
+    search_fields = ("metadata_source", "metadata_source_identifier")
+    list_filter = ("metadata_source",)
+
+
+from app.models import ExternalID
+admin.site.register(ExternalID, ExternalIdAdmin)

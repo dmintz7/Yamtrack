@@ -539,6 +539,7 @@ TMDB_API = config(
 )
 TMDB_NSFW = config("TMDB_NSFW", default=False, cast=bool)
 TMDB_LANG = config("TMDB_LANG", default="en")
+TVDB_LANG = config("TVDB_LANG", default="en")
 
 MAL_API = config(
     "MAL_API",
@@ -833,8 +834,7 @@ LOGGING = {
     'disable_existing_loggers': False,
     'formatters': {
         'simple': {
-            'format': '%(asctime)s  -  %(levelname)-5s  -  %(module)s:%(funcName)s:%(lineno)d  -  %(message)s',
-            'format': '%(asctime)s  -  %(levelname)-5s  -  %(module)s:%(funcName)s:%(lineno)d  -  %(message)s',
+            'format': '%(asctime)s  -  %(levelname)-8s  -  %(module)s:%(funcName)s:%(lineno)d  -  %(message)s',
         },
     },
     'handlers': {

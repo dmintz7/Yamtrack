@@ -61,7 +61,7 @@ from app.models import (
     Status,
     Track,
 )
-from app.providers import manual, services, tmdb
+from app.providers import manual, services, get_tv_provider
 from app.services import music as sync_services
 from app.templatetags import app_tags
 from lists.models import CustomList
@@ -2245,6 +2245,7 @@ def media_details(
     # Enrich related items with user tracking data
     # For public views, use list owner's data if available
     if media_metadata.get("related"):
+        media_metadata["related"].pop("episodes", None) # Remove episodes to avoid errors
         for section_name, related_items in media_metadata["related"].items():
             if related_items:
                 media_metadata["related"][section_name] = (
@@ -2967,7 +2968,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             # Store raw episodes before processing (for runtime extraction)
             raw_episodes = metadata.get("episodes", [])
             
-            metadata["episodes"] = tmdb.process_episodes(
+            metadata["episodes"] = get_tv_provider(source).process_episodes(
                 metadata,
                 [],
             )
@@ -3931,7 +3932,7 @@ def episode_save(request):
 
         item, _ = Item.objects.get_or_create(
             media_id=media_id,
-            source=Sources.TMDB.value,
+            source=source,
             media_type=MediaTypes.SEASON.value,
             season_number=season_number,
             defaults={
