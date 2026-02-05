@@ -488,6 +488,7 @@ class TraktImporter:
             show.get("ids", {}),
             show.get("title"),
             season_number=season_number,
+            source_found=source.value,
         )
         if not season_metadata:
             if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
