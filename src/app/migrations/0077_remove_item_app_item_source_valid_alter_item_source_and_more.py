@@ -17,10 +17,10 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='item',
             name='source',
-            field=models.CharField(choices=[('tmdb', 'The Movie Database'), ('tvdb', 'Skyhook (TVDB Mirror)'), ('mal', 'MyAnimeList'), ('mangaupdates', 'MangaUpdates'), ('igdb', 'Internet Game Database'), ('openlibrary', 'Open Library'), ('hardcover', 'Hardcover'), ('comicvine', 'Comic Vine'), ('bgg', 'BoardGameGeek'), ('musicbrainz', 'MusicBrainz'), ('pocketcasts', 'Pocket Casts'), ('manual', 'Manual')], max_length=20),
+            field=models.CharField(choices=[('tmdb', 'The Movie Database'), ('imdb', 'The Internet Movie Database'), ('tvdb', 'Skyhook (TVDB Mirror)'), ('mal', 'MyAnimeList'), ('mangaupdates', 'MangaUpdates'), ('igdb', 'Internet Game Database'), ('openlibrary', 'Open Library'), ('hardcover', 'Hardcover'), ('comicvine', 'Comic Vine'), ('bgg', 'BoardGameGeek'), ('musicbrainz', 'MusicBrainz'), ('pocketcasts', 'Pocket Casts'), ('manual', 'Manual')], max_length=20),
         ),
         migrations.AddConstraint(
             model_name='item',
-            constraint=models.CheckConstraint(condition=models.Q(('source__in', ['tmdb', 'tvdb', 'mal', 'mangaupdates', 'igdb', 'openlibrary', 'hardcover', 'comicvine', 'bgg', 'musicbrainz', 'pocketcasts', 'manual'])), name='app_item_source_valid'),
+            constraint=models.CheckConstraint(condition=models.Q(('source__in', ['tmdb', 'imdb', 'tvdb', 'mal', 'mangaupdates', 'igdb', 'openlibrary', 'hardcover', 'comicvine', 'bgg', 'musicbrainz', 'pocketcasts', 'manual'])), name='app_item_source_valid'),
         ),
     ]
