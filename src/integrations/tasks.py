@@ -238,6 +238,11 @@ def import_pocketcasts_history(user_id):
     return import_pocketcasts.delay(user_id, mode="new")
 
 
+@shared_task(name="Import from Plex History (Recurring)")
+def import_plex_history(user_id):
+    """Recurring import task for Pocket Casts (called every 2 hours via Celery beat)."""
+    return import_media(plex.plex_history_sync, None, user_id, None)
+
 @shared_task(name="Poll Last.fm for all users")
 def poll_all_lastfm_scrobbles():
     """Global task to poll Last.fm for all connected users.

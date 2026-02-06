@@ -618,3 +618,35 @@ def _raise_for_auth(response: requests.Response):
     if response.status_code == 401:
         raise PlexAuthError("Plex token is invalid or expired")
     response.raise_for_status()
+
+
+def create_plex_title(video):
+    import sys
+    from unidecode import unidecode
+    title = None
+    try:
+        if video.type == "movie" or video.type == "show":
+            try:
+                title = "%s (%s)" % (video.title, video.originallyAvailableAt.strftime("%Y"))
+            except AttributeError:
+                title = video.title
+            except Exception as e:
+                logger.error('Error on line {} - {} - {}'.format(type(e).__name__, sys.exc_info()[-1].tb_lineno, e))
+                title = video.title
+        elif video.type == "season":
+            title = "%s - S%s - %s" % (video.parentTitle, video.index, video.title)
+        elif video.type == "episode":
+            title = "%s - S%sE%s - %s" % (video.grandparentTitle, video.parentIndex, video.index, video.title)
+    except AttributeError:
+        pass
+    except Exception as e:
+        logger.error('Error on line {} - {} - {}'.format(type(e).__name__, sys.exc_info()[-1].tb_lineno, e))
+    return unidecode(title)
+
+
+def get_sys_account(plex, user):
+    return next(
+        (acct for acct in plex.systemAccounts()
+         if acct.name == user.plex_account.plex_username),
+        None,
+    )

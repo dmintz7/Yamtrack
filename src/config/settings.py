@@ -850,3 +850,5 @@ LOGGING = {
 }
 
 TRAKT_BULK_PAGE_SIZE = config("TRAKT_BULK_PAGE_SIZE", default="1000")
+PLEX_WATCH_SYNC = config("PLEX_WATCH_SYNC", default=False)
+PLEX_HOST = config("PLEX_HOST", default=None)
