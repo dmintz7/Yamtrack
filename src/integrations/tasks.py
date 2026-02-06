@@ -238,10 +238,10 @@ def import_pocketcasts_history(user_id):
     return import_pocketcasts.delay(user_id, mode="new")
 
 
-@shared_task(name="Import from Plex History (Recurring)")
-def import_plex_history(user_id):
+@shared_task(name="Import from Plex (Recurring)")
+def import_plex_history(user_id, mode):
     """Recurring import task for Pocket Casts (called every 2 hours via Celery beat)."""
-    return import_media(plex.plex_history_sync, None, user_id, None)
+    return import_media(plex.watch_sync, None, user_id, mode)
 
 @shared_task(name="Poll Last.fm for all users")
 def poll_all_lastfm_scrobbles():
