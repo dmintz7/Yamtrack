@@ -63,6 +63,7 @@ from app.models import (
 )
 from app.providers import manual, services, get_tv_provider
 from app.services import music as sync_services
+from app.statistics import _parse_release_date_str
 from app.templatetags import app_tags
 from lists.models import CustomList
 from users.models import HomeSortChoices, MediaSortChoices, MediaStatusChoices
@@ -1542,6 +1543,7 @@ def media_details(
     if public_list_view:
         try:
             # Get or create the Item for this media
+            from app.models import Item
             item, _ = Item.objects.get_or_create(
                 media_id=media_id,
                 source=source,
