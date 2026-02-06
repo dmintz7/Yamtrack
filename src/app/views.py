@@ -2373,7 +2373,7 @@ def _build_missing_season_metadata(
                 episode_item.runtime_minutes
                 and episode_item.runtime_minutes < 999998
             ):
-                runtime = tmdb.get_readable_duration(episode_item.runtime_minutes)
+                runtime = get_tv_provider(source).get_readable_duration(episode_item.runtime_minutes)
             if episode_item.title and episode_item.title != show_title:
                 title = episode_item.title
 
@@ -2602,7 +2602,7 @@ def season_details(
                 episodes_in_db,
             )
         else:
-            season_metadata["episodes"] = tmdb.process_episodes(
+            season_metadata["episodes"] = get_tv_provider(source).process_episodes(
                 season_metadata,
                 episodes_in_db,
             )
