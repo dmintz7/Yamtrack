@@ -63,6 +63,7 @@ from app.models import (
 )
 from app.providers import manual, services, get_tv_provider
 from app.services import music as sync_services
+from app.statistics import _parse_release_date_str
 from app.templatetags import app_tags
 from lists.models import CustomList
 from users.models import HomeSortChoices, MediaSortChoices, MediaStatusChoices
@@ -1542,6 +1543,7 @@ def media_details(
     if public_list_view:
         try:
             # Get or create the Item for this media
+            from app.models import Item
             item, _ = Item.objects.get_or_create(
                 media_id=media_id,
                 source=source,
@@ -2373,7 +2375,7 @@ def _build_missing_season_metadata(
                 episode_item.runtime_minutes
                 and episode_item.runtime_minutes < 999998
             ):
-                runtime = tmdb.get_readable_duration(episode_item.runtime_minutes)
+                runtime = get_tv_provider(source).get_readable_duration(episode_item.runtime_minutes)
             if episode_item.title and episode_item.title != show_title:
                 title = episode_item.title
 
@@ -2602,7 +2604,7 @@ def season_details(
                 episodes_in_db,
             )
         else:
-            season_metadata["episodes"] = tmdb.process_episodes(
+            season_metadata["episodes"] = get_tv_provider(source).process_episodes(
                 season_metadata,
                 episodes_in_db,
             )
