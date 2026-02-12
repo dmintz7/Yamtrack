@@ -21,6 +21,10 @@ class Migration(migrations.Migration):
     operations = [
         migrations.RemoveConstraint(
             model_name="user",
+            name="home_sort_valid",
+        ),
+        migrations.RemoveConstraint(
+            model_name="user",
             name="tv_sort_valid",
         ),
         migrations.RemoveConstraint(

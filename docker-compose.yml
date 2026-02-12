@@ -1,19 +1,15 @@
 services:
   yamtrack:
     container_name: yamtrack
-    # Image defaults to :latest tag (points to stable release branch)
-    # You can also explicitly use :latest, :release, or :dev
-    image: ghcr.io/dannyvfilms/yamtrack:latest
+    image: dmintz37/yamtrack:latest
     restart: unless-stopped
+    build: .
     depends_on:
       - redis
+    env_file:
+      - .env
     environment:
-      - TZ=Europe/Berlin
-      - SECRET=longstring
       - REDIS_URL=redis://redis:6379
-      - ADMIN_ENABLED=False
-    volumes:
-      - ./db:/yamtrack/db
     ports:
       - "8000:8000"
     networks:

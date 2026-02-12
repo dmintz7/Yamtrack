@@ -2194,9 +2194,9 @@ def populate_episode_runtime_data(season_keys: list[str] | None = None):
 
             season_data = season_metadata[f"season/{season_number}"]
 
-            from app.providers import tmdb
+            from app.providers import get_tv_provider
 
-            episodes_metadata = tmdb.process_episodes(season_data, [])
+            episodes_metadata = get_tv_provider(source).process_episodes(season_data, [])
             if not episodes_metadata:
                 logger.warning(
                     "No episode metadata after processing for %s S%s - skipping %s episodes needing runtime",

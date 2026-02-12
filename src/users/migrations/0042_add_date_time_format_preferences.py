@@ -46,7 +46,15 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        AddFieldIfNotExists(
+        migrations.RemoveField(
+            model_name='user',
+            name='date_format',
+        ),
+        migrations.RemoveField(
+            model_name='user',
+            name='time_format',
+        ),
+        migrations.AddField(
             model_name='user',
             name='date_format',
             field=models.CharField(choices=[('Y-m-d', '2026-01-18 (ISO)'), ('d/m/Y', '18/01/2026 (EU)'), ('m/d/Y', '01/18/2026 (US)'), ('M j, Y', 'Jan 18, 2026')], default='Y-m-d', help_text='Preferred date display format', max_length=20),

@@ -65,8 +65,9 @@ from app.models import (
     Status,
     Track,
 )
-from app.providers import manual, services, tmdb
+from app.providers import manual, services, get_tv_provider
 from app.services import music as sync_services
+from app.statistics import _parse_release_date_str
 from app.templatetags import app_tags
 from lists.models import CustomList
 from users.models import HomeSortChoices, MediaSortChoices, MediaStatusChoices
@@ -1576,6 +1577,7 @@ def media_details(
     if public_list_view:
         try:
             # Get or create the Item for this media
+            from app.models import Item
             item, _ = Item.objects.get_or_create(
                 media_id=media_id,
                 source=source,
@@ -2313,6 +2315,7 @@ def media_details(
     # Enrich related items with user tracking data
     # For public views, use list owner's data if available
     if media_metadata.get("related"):
+        media_metadata["related"].pop("episodes", None) # Remove episodes to avoid errors
         for section_name, related_items in media_metadata["related"].items():
             if related_items:
                 media_metadata["related"][section_name] = (
@@ -2439,7 +2442,7 @@ def _build_missing_season_metadata(
                 episode_item.runtime_minutes
                 and episode_item.runtime_minutes < 999998
             ):
-                runtime = tmdb.get_readable_duration(episode_item.runtime_minutes)
+                runtime = get_tv_provider(source).get_readable_duration(episode_item.runtime_minutes)
             if episode_item.title and episode_item.title != show_title:
                 title = episode_item.title
 
@@ -2668,7 +2671,7 @@ def season_details(
                 episodes_in_db,
             )
         else:
-            season_metadata["episodes"] = tmdb.process_episodes(
+            season_metadata["episodes"] = get_tv_provider(source).process_episodes(
                 season_metadata,
                 episodes_in_db,
             )
@@ -3038,7 +3041,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             # Store raw episodes before processing (for runtime extraction)
             raw_episodes = metadata.get("episodes", [])
             
-            metadata["episodes"] = tmdb.process_episodes(
+            metadata["episodes"] = get_tv_provider(source).process_episodes(
                 metadata,
                 [],
             )
@@ -3994,7 +3997,7 @@ def episode_save(request):
 
         item, _ = Item.objects.get_or_create(
             media_id=media_id,
-            source=Sources.TMDB.value,
+            source=source,
             media_type=MediaTypes.SEASON.value,
             season_number=season_number,
             defaults={
