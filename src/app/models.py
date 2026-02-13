@@ -41,7 +41,7 @@ class Sources(models.TextChoices):
     """Choices for the source of the item."""
 
     TMDB = "tmdb", "The Movie Database"
-    IMDB = "imdb", "The Movie Database"
+    IMDB = "imdb", "The Internet Movie Database"
     TVDB = "tvdb", "Skyhook (TVDB Mirror)"
     MAL = "mal", "MyAnimeList"
     MANGAUPDATES = "mangaupdates", "MangaUpdates"
@@ -86,7 +86,7 @@ class MediaTypes(models.TextChoices):
 class Item(CalendarTriggerMixin, models.Model):
     """Model to store basic information about media items."""
 
-    media_id = models.CharField(max_length=20)
+    media_id = models.CharField(max_length=50)
     source = models.CharField(
         max_length=20,
         choices=Sources.choices,
@@ -3212,7 +3212,7 @@ class PodcastEpisode(models.Model):
         related_name="episodes",
     )
     episode_uuid = models.CharField(
-        max_length=36,
+        max_length=50,
         unique=True,
         help_text="Pocket Casts episode UUID",
     )

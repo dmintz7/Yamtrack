@@ -8,6 +8,8 @@ def get_tv_provider(source):
     }
 
     try:
+        if isinstance(source, str):
+            source = Sources(source)
         return providers[Sources(source)]
     except KeyError:
         raise ValueError(f"Unsupported TV provider source: {source}")
