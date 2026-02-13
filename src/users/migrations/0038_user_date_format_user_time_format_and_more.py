@@ -28,7 +28,7 @@ class Migration(migrations.Migration):
                 max_length=20,
             ),
         ),
-        migrations.AddField(
+        AddFieldIfNotExists(
             model_name="user",
             name="time_format",
             field=models.CharField(

@@ -535,6 +535,9 @@
   .mb-8 {
     margin-bottom: calc(var(--spacing) * 8);
   }
+  .mb-10 {
+    margin-bottom: calc(var(--spacing) * 10);
+  }
   .mb-12 {
     margin-bottom: calc(var(--spacing) * 12);
   }
@@ -847,9 +850,6 @@
   .max-w-\[11rem\] {
     max-width: 11rem;
   }
-  .max-w-\[110px\] {
-    max-width: 110px;
-  }
   .max-w-\[250px\] {
     max-width: 250px;
   }
@@ -908,8 +908,16 @@
     --tw-translate-x: calc(1/2 * 100%);
     translate: var(--tw-translate-x) var(--tw-translate-y);
   }
+  .-translate-y-1 {
+    --tw-translate-y: calc(var(--spacing) * -1);
+    translate: var(--tw-translate-x) var(--tw-translate-y);
+  }
   .-translate-y-1\/2 {
     --tw-translate-y: calc(calc(1/2 * 100%) * -1);
+    translate: var(--tw-translate-x) var(--tw-translate-y);
+  }
+  .translate-y-0 {
+    --tw-translate-y: calc(var(--spacing) * 0);
     translate: var(--tw-translate-x) var(--tw-translate-y);
   }
   .translate-y-\[-1rem\] {
@@ -1002,6 +1010,9 @@
   }
   .items-center {
     align-items: center;
+  }
+  .items-end {
+    align-items: flex-end;
   }
   .items-start {
     align-items: flex-start;
@@ -1632,6 +1643,9 @@
   }
   .fill-yellow-400 {
     fill: var(--color-yellow-400);
+  }
+  .object-contain {
+    object-fit: contain;
   }
   .object-cover {
     object-fit: cover;
@@ -2494,6 +2508,13 @@
       }
     }
   }
+  .hover\:text-indigo-200 {
+    &:hover {
+      @media (hover: hover) {
+        color: var(--color-indigo-200);
+      }
+    }
+  }
   .hover\:text-indigo-300 {
     &:hover {
       @media (hover: hover) {
@@ -2728,6 +2749,11 @@
       margin-bottom: calc(var(--spacing) * 8);
     }
   }
+  .sm\:ml-auto {
+    @media (width >= 40rem) {
+      margin-left: auto;
+    }
+  }
   .sm\:h-8 {
     @media (width >= 40rem) {
       height: calc(var(--spacing) * 8);
@@ -2743,11 +2769,6 @@
       width: calc(var(--spacing) * 8);
     }
   }
-  .sm\:w-32 {
-    @media (width >= 40rem) {
-      width: calc(var(--spacing) * 32);
-    }
-  }
   .sm\:w-\[340px\] {
     @media (width >= 40rem) {
       width: 340px;
@@ -2761,11 +2782,6 @@
   .sm\:max-w-\[14rem\] {
     @media (width >= 40rem) {
       max-width: 14rem;
-    }
-  }
-  .sm\:max-w-none {
-    @media (width >= 40rem) {
-      max-width: none;
     }
   }
   .sm\:grid-cols-2 {
@@ -2898,11 +2914,6 @@
     @media (width >= 40rem) {
       font-size: var(--text-xl);
       line-height: var(--tw-leading, var(--text-xl--line-height));
-    }
-  }
-  .sm\:whitespace-normal {
-    @media (width >= 40rem) {
-      white-space: normal;
     }
   }
   .md\:right-0 {

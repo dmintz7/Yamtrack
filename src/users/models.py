@@ -4,6 +4,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 from django_celery_beat.models import PeriodicTask
 from django_celery_results.models import TaskResult
 
@@ -147,6 +148,14 @@ class StatisticsRangeChoices(models.TextChoices):
     LAST_6_MONTHS = "Last 6 Months", "Last 6 Months"
     LAST_12_MONTHS = "Last 12 Months", "Last 12 Months"
     ALL_TIME = "All Time", "All Time"
+
+
+class TopTalentSortChoices(models.TextChoices):
+    """Choices for sorting top cast/crew/studio cards on statistics."""
+
+    PLAYS = "plays", "Plays"
+    TIME = "time", "Time"
+    TITLES = "titles", "Titles"
 
 
 class GameLoggingStyleChoices(models.TextChoices):
@@ -573,6 +582,26 @@ class User(AbstractUser):
         blank=True,
         help_text="Comma-separated list of Plex usernames for webhook matching",
     )
+    plex_webhook_last_received_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="Timestamp of the last Plex webhook received",
+    )
+    plex_webhook_last_error = models.TextField(
+        blank=True,
+        default="",
+        help_text="Last Plex webhook error message",
+    )
+    plex_webhook_last_error_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="Timestamp of the last Plex webhook error",
+    )
+    plex_webhook_token_rotated_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="When the API token was regenerated (update webhook URLs)",
+    )
 
     jellyseerr_enabled = models.BooleanField(
         default=False,
@@ -623,6 +652,12 @@ class User(AbstractUser):
         default=StatisticsRangeChoices.LAST_12_MONTHS,
         choices=StatisticsRangeChoices.choices,
         help_text="Default predefined range for the Statistics page",
+    )
+    top_talent_sort_by = models.CharField(
+        max_length=20,
+        default=TopTalentSortChoices.PLAYS,
+        choices=TopTalentSortChoices.choices,
+        help_text="Sort metric for top cast/crew/studio cards on the Statistics page",
     )
 
     activity_history_view = models.CharField(
@@ -797,6 +832,10 @@ class User(AbstractUser):
             models.CheckConstraint(
                 name="statistics_default_range_valid",
                 condition=models.Q(statistics_default_range__in=StatisticsRangeChoices.values),
+            ),
+            models.CheckConstraint(
+                name="top_talent_sort_by_valid",
+                condition=models.Q(top_talent_sort_by__in=TopTalentSortChoices.values),
             ),
             models.CheckConstraint(
                 name="list_detail_sort_valid",
@@ -1170,4 +1209,33 @@ class User(AbstractUser):
     def regenerate_token(self):
         """Regenerate the user's token."""
         self.token = generate_token()
-        self.save(update_fields=["token"])
+        self.plex_webhook_token_rotated_at = timezone.now()
+        self.save(update_fields=["token", "plex_webhook_token_rotated_at"])
+
+    def mark_plex_webhook_received(self, when=None):
+        """Record a successful Plex webhook delivery."""
+        when = when or timezone.now()
+        self.plex_webhook_last_received_at = when
+        self.plex_webhook_last_error = ""
+        self.plex_webhook_last_error_at = None
+        self.plex_webhook_token_rotated_at = None
+        self.save(
+            update_fields=[
+                "plex_webhook_last_received_at",
+                "plex_webhook_last_error",
+                "plex_webhook_last_error_at",
+                "plex_webhook_token_rotated_at",
+            ],
+        )
+
+    def mark_plex_webhook_error(self, message, when=None):
+        """Record a Plex webhook error for UI visibility."""
+        when = when or timezone.now()
+        self.plex_webhook_last_error = message
+        self.plex_webhook_last_error_at = when
+        self.save(
+            update_fields=[
+                "plex_webhook_last_error",
+                "plex_webhook_last_error_at",
+            ],
+        )

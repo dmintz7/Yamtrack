@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% load app_tags %}
+{% load user_tags %}
+
+{% block title %}
+  {{ person.name }} - Yamtrack
+{% endblock title %}
+
+{% block content %}
+  <div class="flex flex-col md:flex-row gap-8 md:gap-10 mb-10 md:mb-8">
+    <div class="w-full md:w-1/4 max-w-[250px] mx-auto md:mx-0">
+      <img
+        src="{{ person.image|default:IMG_NONE }}"
+        alt="{{ person.name }}"
+        class="w-full rounded-lg shadow-lg bg-[#2a2f35] object-cover">
+
+      <div class="mt-4 p-3 bg-[#2a2f35] rounded-lg">
+        <a
+          href="{{ history_filter_url }}"
+          class="w-full inline-flex items-center justify-center rounded-md bg-amber-600 px-3 py-2 text-sm text-white transition-colors hover:bg-amber-700">
+          View Plays in History
+        </a>
+      </div>
+    </div>
+
+    <div class="w-full md:w-3/4">
+      <h1 class="text-3xl font-bold mb-4 text-center md:text-start">{{ person.name }}</h1>
+
+      <div class="flex flex-wrap gap-2 mb-4">
+        {% if person.known_for_department %}
+          <span class="px-3 py-1 bg-indigo-600 text-white rounded-full text-sm">
+            {{ person.known_for_department }}
+          </span>
+        {% endif %}
+        {% if tracked_plays_count is not None %}
+          <span class="px-3 py-1 bg-[#2a2f35] text-gray-200 rounded-full text-sm">
+            {{ watched_movie_count }} movie{{ watched_movie_count|pluralize }}
+          </span>
+          <span class="px-3 py-1 bg-[#2a2f35] text-gray-200 rounded-full text-sm">
+            {{ watched_show_count }} show{{ watched_show_count|pluralize }}
+          </span>
+          <span class="px-3 py-1 bg-[#2a2f35] text-gray-200 rounded-full text-sm">
+            {{ tracked_plays_count }} tracked play{{ tracked_plays_count|pluralize }}
+          </span>
+          {% if tracked_hours_count %}
+            <span class="px-3 py-1 bg-[#2a2f35] text-gray-200 rounded-full text-sm">
+              {{ tracked_hours_count }}
+            </span>
+          {% endif %}
+        {% endif %}
+      </div>
+
+      <div class="bg-[#2a2f35] p-4 rounded-lg mb-6">
+        {% if person.biography %}
+          <div
+            x-data="{ isExpanded: false, isClamped: false, checkClamp() { const element = this.$refs.bioText; this.isClamped = element.scrollHeight > element.clientHeight; } }"
+            x-init="$nextTick(() => checkClamp())">
+            <p
+              x-ref="bioText"
+              :class="isExpanded ? '' : 'line-clamp-5'"
+              class="text-gray-300 text-pretty">
+              {{ person.biography|linebreaksbr|safe }}
+            </p>
+            <button
+              x-show="isClamped"
+              @click="isExpanded = !isExpanded"
+              class="text-indigo-400 hover:text-indigo-300 text-sm mt-2 focus:outline-none transition-colors cursor-pointer">
+              <span x-text="isExpanded ? 'Show less' : 'Show more'"></span>
+            </button>
+          </div>
+        {% else %}
+          <p class="text-gray-500">No biography available.</p>
+        {% endif %}
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {% if person.birth_date %}
+          <div class="bg-[#2a2f35] rounded-lg p-3">
+            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Born</h3>
+            <p class="text-sm text-gray-200 mt-1">{{ person.birth_date|user_date_format:user }}</p>
+          </div>
+        {% endif %}
+        {% if person.death_date %}
+          <div class="bg-[#2a2f35] rounded-lg p-3">
+            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Died</h3>
+            <p class="text-sm text-gray-200 mt-1">{{ person.death_date|user_date_format:user }}</p>
+          </div>
+        {% endif %}
+        {% if person.place_of_birth %}
+          <div class="bg-[#2a2f35] rounded-lg p-3">
+            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Place of Birth</h3>
+            <p class="text-sm text-gray-200 mt-1 line-clamp-2">{{ person.place_of_birth }}</p>
+          </div>
+        {% endif %}
+        <div class="bg-[#2a2f35] rounded-lg p-3">
+          <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wide">Source</h3>
+          <p class="text-sm mt-1">
+            {% if source_url %}
+              <a
+                href="{{ source_url }}"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-gray-200 hover:text-indigo-500 transition-colors duration-200">
+                {{ source|source_readable }}
+              </a>
+            {% else %}
+              <span class="text-gray-200">{{ source|source_readable }}</span>
+            {% endif %}
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section class="mb-8">
+    <div class="flex items-end justify-between gap-3 mb-4">
+      <h2 class="text-xl font-bold">Watched Content</h2>
+      <p class="text-xs text-gray-400">
+        {{ watched_filmography|length }} title{{ watched_filmography|length|pluralize }}
+      </p>
+    </div>
+    {% if watched_filmography %}
+      <div class="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">
+        {% for entry in watched_filmography %}
+          {% include "app/components/person_filmography_card.html" with entry=entry source=source user=user IMG_NONE=IMG_NONE show_watched_runtime_chip=True only %}
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="bg-[#2a2f35] p-6 rounded-lg text-center">
+        <p class="text-gray-400">No watched titles yet.</p>
+      </div>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="flex items-end justify-between gap-3 mb-4">
+      <h2 class="text-xl font-bold">Filmography</h2>
+      <p class="text-xs text-gray-400">{{ filmography|length }} title{{ filmography|length|pluralize }}</p>
+    </div>
+    {% if filmography %}
+      <div class="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">
+        {% for entry in filmography %}
+          {% include "app/components/person_filmography_card.html" with entry=entry source=source user=user IMG_NONE=IMG_NONE show_watched_runtime_chip=False only %}
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="bg-[#2a2f35] p-6 rounded-lg text-center">
+        <p class="text-gray-400">No filmography available.</p>
+      </div>
+    {% endif %}
+  </section>
+{% endblock content %}
