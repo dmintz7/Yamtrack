@@ -20,7 +20,7 @@ from django.db.models import prefetch_related_objects
 from django.db.models.functions import ExtractDay, ExtractMonth
 from django.db.utils import OperationalError
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import formats, timezone
 from django.utils.dateparse import parse_date
@@ -30,6 +30,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from app import (
     cache_utils,
+    credits,
     config,
     helpers,
     history_cache,
@@ -53,9 +54,12 @@ from app.models import (
     Artist,
     BasicMedia,
     CollectionEntry,
+    Episode,
     Item,
     MediaTypes,
+    Movie,
     Music,
+    Person,
     Season,
     Sources,
     Status,
@@ -67,6 +71,7 @@ from app.statistics import _parse_release_date_str
 from app.templatetags import app_tags
 from lists.models import CustomList
 from users.models import HomeSortChoices, MediaSortChoices, MediaStatusChoices
+from users.models import TopTalentSortChoices
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +83,35 @@ MEDIA_RATING_CHOICES = (
 RECENTLY_NOT_RATED_KEY = "recently_not_rated"
 RECENTLY_NOT_RATED_LABEL = "Recently Played - Not Rated"
 RECENTLY_NOT_RATED_DAYS = 7
+
+
+class _EmptyHistoryProxy:
+    """Minimal queryset-like history object for empty podcast wrappers."""
+
+    def all(self):
+        return []
+
+    def count(self):
+        return 0
+
+    def filter(self, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+
+class _DummyPodcastWrapper:
+    """Template-compatible podcast wrapper when no plays exist yet."""
+
+    def __init__(self, item):
+        self.item = item
+        self.id = 0
+        self.history = _EmptyHistoryProxy()
+
+    @property
+    def completed_play_count(self):
+        return 0
 
 
 @require_GET
@@ -1812,7 +1846,6 @@ def media_details(
 
             # Build episode items - create Item objects for enrichment
             # Initially load first 20 episodes, rest will be loaded via infinite scroll
-            from app.models import Item
             episode_items_data = []
             episode_items_map = {}  # Map media_id to Item object
             initial_limit = 20
@@ -2002,14 +2035,7 @@ def media_details(
 
                     podcast_wrapper = PodcastHistoryWrapper(all_podcasts, enriched["item"], all_history)
                 else:
-                    # Create a dummy Podcast object with item for template compatibility when podcast is None
-                    class DummyPodcast:
-                        def __init__(self, item):
-                            self.item = item
-                            self.id = 0
-                            self.history = type("History", (), {"count": lambda: 0, "all": list})()
-
-                    podcast_wrapper = DummyPodcast(enriched["item"])
+                    podcast_wrapper = _DummyPodcastWrapper(enriched["item"])
 
                 # Create episode dict compatible with TV episode format
                 # Include media_id, source, media_type for tracking modals
@@ -2081,11 +2107,53 @@ def media_details(
 
     media_metadata = services.get_media_metadata(media_type, media_id, source)
 
+    # Persist series info for books if available
+    if media_type == MediaTypes.BOOK.value and isinstance(media_metadata, dict):
+        try:
+            item = Item.objects.get(
+                media_id=media_id,
+                source=source,
+                media_type=media_type,
+            )
+            update_fields = []
+            if media_metadata.get("series_name") and item.series_name != media_metadata["series_name"]:
+                item.series_name = media_metadata["series_name"]
+                update_fields.append("series_name")
+            if media_metadata.get("series_position") is not None and item.series_position != media_metadata["series_position"]:
+                item.series_position = media_metadata["series_position"]
+                update_fields.append("series_position")
+            
+            if update_fields:
+                item.save(update_fields=update_fields)
+        except Item.DoesNotExist:
+            pass
+
+    if isinstance(media_metadata, dict):
+        media_metadata.setdefault("cast", [])
+        media_metadata.setdefault("crew", [])
+        media_metadata.setdefault("studios_full", [])
+
     # For podcasts, ensure source is in metadata dict (fixes KeyError in template)
     if media_type == MediaTypes.PODCAST.value and isinstance(media_metadata, dict):
         media_metadata["source"] = source
         media_metadata["media_type"] = media_type
         media_metadata["media_id"] = media_id
+
+    if (
+        source == Sources.TMDB.value
+        and media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value)
+        and isinstance(media_metadata, dict)
+    ):
+        detail_item = Item.objects.filter(
+            media_id=media_id,
+            source=source,
+            media_type=media_type,
+        ).first()
+        if detail_item:
+            missing_people = not detail_item.person_credits.exists()
+            missing_studios = not detail_item.studio_credits.exists()
+            if missing_people or missing_studios:
+                credits.sync_item_credits_from_metadata(detail_item, media_metadata)
 
     # For TV shows, apply fallback for seasons without posters (handles cached metadata)
     if media_type == MediaTypes.TV.value and isinstance(media_metadata, dict):
@@ -2282,7 +2350,6 @@ def media_details(
     item_id_for_polling = None
     
     if not public_view and media_type != MediaTypes.PODCAST.value:
-        from app.models import Item
         from app.helpers import is_item_collected, get_tv_show_collection_stats
         
         try:
@@ -2962,6 +3029,10 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
         if media_type == MediaTypes.BOOK.value and not item.number_of_pages and number_of_pages:
             item.number_of_pages = number_of_pages
             item.save(update_fields=["number_of_pages"])
+
+        if source == Sources.TMDB.value and media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value):
+            credits.sync_item_credits_from_metadata(item, metadata)
+
         title = metadata["title"]
         if season_number:
             title += f" - Season {season_number}"
@@ -3489,19 +3560,7 @@ def track_modal(
 
                 podcast = PodcastHistoryWrapper(all_podcasts, item, all_history)
             else:
-                # Create a dummy Podcast object with item for template compatibility when podcast is None
-                class DummyPodcast:
-                    def __init__(self, item):
-                        self.item = item
-                        self.id = 0
-                        self.history = type("History", (), {"count": lambda: 0, "all": list})()
-
-                    @property
-                    def completed_play_count(self):
-                        """Return 0 for dummy podcast (no plays)."""
-                        return 0
-
-                podcast = DummyPodcast(item)
+                podcast = _DummyPodcastWrapper(item)
 
             return render(
                 request,
@@ -3777,6 +3836,10 @@ def media_save(request):
             needs_save = True
         if needs_save:
             item.save()
+
+        if source == Sources.TMDB.value and media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value):
+            credits.sync_item_credits_from_metadata(item, metadata)
+
         model = apps.get_model(app_label="app", model_name=media_type)
         instance = model(item=item, user=request.user)
 
@@ -4742,7 +4805,14 @@ def history(request):
         # Extract filter parameters from query string
         filters = {}
         int_params = ["album", "artist", "tv", "season", "season_number", "podcast_show"]
-        str_params = ["genre", "media_type", "media_id", "source"]
+        str_params = [
+            "genre",
+            "media_type",
+            "media_id",
+            "source",
+            "person_source",
+            "person_id",
+        ]
         for param in int_params:
             value = request.GET.get(param)
             if value:
@@ -5013,6 +5083,192 @@ def history(request):
             "history_refreshing": False,
         }
         return render(request, "app/history.html", context)
+
+
+@login_not_required
+@require_GET
+def person_detail(request, source, person_id, name):
+    """Render a cast/crew person bio page."""
+    del name  # URL slug is cosmetic; person_id is canonical.
+
+    if source != Sources.TMDB.value:
+        return HttpResponseBadRequest("Person pages are only available for TMDB metadata.")
+
+    person_metadata = tmdb.person(person_id)
+    person = credits.upsert_person_profile(source, person_id, person_metadata)
+
+    person_id_str = str(person_id)
+    person_data = {
+        "source": source,
+        "person_id": person_id_str,
+        "name": person_metadata.get("name")
+        or (person.name if person else "Unknown Person"),
+        "image": person_metadata.get("image")
+        or (person.image if person else settings.IMG_NONE),
+        "biography": person_metadata.get("biography")
+        or (person.biography if person else ""),
+        "known_for_department": person_metadata.get("known_for_department")
+        or (person.known_for_department if person else ""),
+        "birth_date": person_metadata.get("birth_date")
+        or (person.birth_date.isoformat() if person and person.birth_date else None),
+        "death_date": person_metadata.get("death_date")
+        or (person.death_date.isoformat() if person and person.death_date else None),
+        "place_of_birth": person_metadata.get("place_of_birth")
+        or (person.place_of_birth if person else ""),
+    }
+
+    filmography = [dict(entry) for entry in person_metadata.get("filmography", [])]
+    filmography_media_ids = {
+        str(entry.get("media_id"))
+        for entry in filmography
+        if entry.get("media_id") is not None
+    }
+
+    tracked_items = Item.objects.none()
+    if filmography_media_ids:
+        tracked_items = Item.objects.filter(
+            source=source,
+            media_type__in=(MediaTypes.MOVIE.value, MediaTypes.TV.value),
+            media_id__in=filmography_media_ids,
+        )
+    tracked_item_map = {
+        (item.media_type, str(item.media_id)): item
+        for item in tracked_items
+    }
+
+    watched_media_keys = set()
+    watched_person_minutes_by_media_key = {}
+    person_talent_totals = None
+    if request.user.is_authenticated:
+        person_talent_totals = statistics_cache.get_person_talent_totals(
+            request.user,
+            source,
+            person_id_str,
+        )
+        watched_person_minutes_by_media_key = (
+            person_talent_totals.get("minutes_by_media_key", {})
+            if person_talent_totals
+            else {}
+        )
+
+    if request.user.is_authenticated and filmography_media_ids:
+        watched_movie_media_ids = {
+            str(entry.get("media_id"))
+            for entry in filmography
+            if entry.get("media_type") == MediaTypes.MOVIE.value
+            and entry.get("media_id") is not None
+        }
+        watched_tv_media_ids = {
+            str(entry.get("media_id"))
+            for entry in filmography
+            if entry.get("media_type") == MediaTypes.TV.value
+            and entry.get("media_id") is not None
+        }
+
+        if watched_movie_media_ids:
+            watched_movies = Movie.objects.filter(
+                user=request.user,
+                item__source=source,
+                item__media_type=MediaTypes.MOVIE.value,
+                item__media_id__in=watched_movie_media_ids,
+            ).exclude(start_date__isnull=True, end_date__isnull=True)
+            watched_media_keys.update(
+                (media_type, str(media_id))
+                for media_type, media_id in watched_movies.values_list(
+                    "item__media_type",
+                    "item__media_id",
+                ).distinct()
+            )
+
+        if watched_tv_media_ids:
+            watched_tv = Episode.objects.filter(
+                related_season__user=request.user,
+                end_date__isnull=False,
+                related_season__related_tv__item__source=source,
+                related_season__related_tv__item__media_type=MediaTypes.TV.value,
+                related_season__related_tv__item__media_id__in=watched_tv_media_ids,
+            )
+            watched_media_keys.update(
+                (media_type, str(media_id))
+                for media_type, media_id in watched_tv.values_list(
+                    "related_season__related_tv__item__media_type",
+                    "related_season__related_tv__item__media_id",
+                ).distinct()
+            )
+
+    for entry in filmography:
+        media_key = (entry.get("media_type"), str(entry.get("media_id")))
+        entry["tracked_item"] = tracked_item_map.get(media_key)
+        entry["is_watched"] = media_key in watched_media_keys
+
+    watched_filmography = []
+    if watched_media_keys:
+        seen_watched_media = set()
+        for entry in filmography:
+            media_key = (entry.get("media_type"), str(entry.get("media_id")))
+            if media_key in watched_media_keys and media_key not in seen_watched_media:
+                watched_entry = dict(entry)
+                watched_minutes = watched_person_minutes_by_media_key.get(media_key, 0)
+                if watched_minutes > 0:
+                    watched_entry["watched_person_runtime_display"] = (
+                        helpers.minutes_to_hhmm(watched_minutes)
+                    )
+                watched_filmography.append(watched_entry)
+                seen_watched_media.add(media_key)
+    watched_movie_count = sum(
+        1 for media_type, _ in watched_media_keys if media_type == MediaTypes.MOVIE.value
+    )
+    watched_show_count = sum(
+        1 for media_type, _ in watched_media_keys if media_type == MediaTypes.TV.value
+    )
+
+    history_filter_url = (
+        f"{reverse('history')}?person_source={source}&person_id={person_id}"
+    )
+    source_url = None
+    if source == Sources.TMDB.value:
+        source_url = f"https://www.themoviedb.org/person/{person_id_str}"
+    tracked_plays_count = None
+    tracked_hours_count = None
+    if request.user.is_authenticated:
+        episode_plays = (
+            Episode.objects.filter(
+                related_season__user=request.user,
+                end_date__isnull=False,
+                related_season__related_tv__item__person_credits__person__source=source,
+                related_season__related_tv__item__person_credits__person__source_person_id=person_id_str,
+            )
+            .distinct()
+            .count()
+        )
+        movie_plays = (
+            Movie.objects.filter(
+                user=request.user,
+                item__person_credits__person__source=source,
+                item__person_credits__person__source_person_id=person_id_str,
+            )
+            .exclude(start_date__isnull=True, end_date__isnull=True)
+            .distinct()
+            .count()
+        )
+        tracked_plays_count = episode_plays + movie_plays
+        if person_talent_totals:
+            tracked_hours_count = person_talent_totals.get("watched_time")
+
+    context = {
+        "user": request.user,
+        "person": person_data,
+        "watched_filmography": watched_filmography,
+        "watched_movie_count": watched_movie_count,
+        "watched_show_count": watched_show_count,
+        "filmography": filmography,
+        "history_filter_url": history_filter_url,
+        "tracked_plays_count": tracked_plays_count,
+        "tracked_hours_count": tracked_hours_count,
+        "source": source,
+        "source_url": source_url,
+    }
+    return render(request, "app/person_detail.html", context)
 
 
 @require_GET
@@ -6040,12 +6296,7 @@ def podcast_episodes_api(request, show_id):
 
                 podcast_wrapper = PodcastHistoryWrapper(user_podcast, enriched["item"] if enriched else item, all_history)
             else:
-                class DummyPodcast:
-                    def __init__(self, item):
-                        self.item = item
-                        self.id = 0
-                        self.history = type("History", (), {"count": lambda: 0, "all": list})()
-                podcast_wrapper = DummyPodcast(enriched["item"] if enriched else item)
+                podcast_wrapper = _DummyPodcastWrapper(enriched["item"] if enriched else item)
 
             episode_list.append({
                 "title": episode_obj.title,
@@ -6723,12 +6974,7 @@ def podcast_save(request):
 
             podcast_wrapper = PodcastHistoryWrapper(user_podcast, item, all_history)
         else:
-            class DummyPodcast:
-                def __init__(self, item):
-                    self.item = item
-                    self.id = 0
-                    self.history = type("History", (), {"count": lambda: 0, "all": list})()
-            podcast_wrapper = DummyPodcast(item)
+            podcast_wrapper = _DummyPodcastWrapper(item)
 
         # Create adapter classes
         class PodcastEpisodeAdapter:
@@ -7007,6 +7253,7 @@ def statistics(request):
             "top_rated_movie": top_rated_movie,
             "top_rated_tv": top_rated_tv,
             "top_played": statistics_data["top_played"],
+            "top_talent": statistics_data.get("top_talent", {}),
             "status_distribution": statistics_data["status_distribution"],
             "status_pie_chart_data": statistics_data["status_pie_chart_data"],
             "hours_per_media_type": statistics_data["hours_per_media_type"],
@@ -7053,6 +7300,7 @@ def statistics(request):
             "score_distribution": {},
             "top_rated": [],
             "top_played": [],
+            "top_talent": {},
             "status_distribution": {},
             "status_pie_chart_data": {},
             "hours_per_media_type": {},
@@ -7075,6 +7323,7 @@ def statistics(request):
             "score_distribution": empty_statistics_data["score_distribution"],
             "top_rated": empty_statistics_data["top_rated"],
             "top_played": empty_statistics_data["top_played"],
+            "top_talent": empty_statistics_data["top_talent"],
             "status_distribution": empty_statistics_data["status_distribution"],
             "status_pie_chart_data": empty_statistics_data["status_pie_chart_data"],
             "hours_per_media_type": empty_statistics_data["hours_per_media_type"],
@@ -7115,6 +7364,51 @@ def refresh_statistics(request):
     )
     
     return JsonResponse({"success": True, "message": "Statistics refresh scheduled"})
+
+
+@require_POST
+def update_top_talent_sort(request):
+    """Autosave top talent sort preference from statistics page controls."""
+    sort_by = request.POST.get("sort_by")
+    range_name = request.POST.get("range_name")
+
+    valid_sort_values = list(TopTalentSortChoices.values)
+    if sort_by not in valid_sort_values:
+        return JsonResponse(
+            {
+                "error": "Invalid sort_by",
+                "valid_values": valid_sort_values,
+            },
+            status=400,
+        )
+
+    previous_sort = request.user.top_talent_sort_by
+    updated_sort = request.user.update_preference("top_talent_sort_by", sort_by)
+    changed = previous_sort != updated_sort
+    requires_reload = False
+
+    if range_name in statistics_cache.PREDEFINED_RANGES:
+        try:
+            if statistics_cache.range_needs_top_talent_upgrade(request.user.id, range_name):
+                statistics_cache.invalidate_statistics_cache(request.user.id, range_name)
+                statistics_cache.refresh_statistics_cache(request.user.id, range_name)
+                requires_reload = True
+        except Exception as exc:  # pragma: no cover - best effort compatibility upgrade
+            logger.debug(
+                "top_talent_sort_upgrade_failed user_id=%s range=%s error=%s",
+                request.user.id,
+                range_name,
+                exc,
+            )
+
+    return JsonResponse(
+        {
+            "success": True,
+            "sort_by": updated_sort,
+            "changed": changed,
+            "requires_reload": requires_reload,
+        },
+    )
 
 
 @require_GET
