@@ -195,6 +195,18 @@ WSGI_APPLICATION = "config.wsgi.application"
 Path(BASE_DIR / "db").mkdir(parents=True, exist_ok=True)
 
 if config("DB_HOST", default=None):
+    DB_POOL_ENABLED = config("DB_POOL_ENABLED", default=False, cast=bool)
+    DB_POOL_MIN = config("DB_POOL_MIN", default=0, cast=int)
+    DB_POOL_MAX = config("DB_POOL_MAX", default=2, cast=int)
+    DB_POOL_TIMEOUT = config("DB_POOL_TIMEOUT", default=30, cast=int)
+    db_options = {}
+    if DB_POOL_ENABLED:
+        db_options["pool"] = {
+            "min_size": DB_POOL_MIN,
+            "max_size": DB_POOL_MAX,
+            "timeout": DB_POOL_TIMEOUT,
+        }
+
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
@@ -203,9 +215,7 @@ if config("DB_HOST", default=None):
             "USER": config("DB_USER", default=secret("DB_USER_FILE")),
             "PASSWORD": config("DB_PASSWORD", default=secret("DB_PASSWORD_FILE")),
             "PORT": config("DB_PORT"),
-            "OPTIONS": {
-                "pool": True,
-            },
+            "OPTIONS": db_options,
         },
     }
 
@@ -529,6 +539,7 @@ TMDB_API = config(
 )
 TMDB_NSFW = config("TMDB_NSFW", default=False, cast=bool)
 TMDB_LANG = config("TMDB_LANG", default="en")
+TVDB_LANG = config("TVDB_LANG", default="en")
 
 MAL_API = config(
     "MAL_API",
@@ -823,8 +834,7 @@ LOGGING = {
     'disable_existing_loggers': False,
     'formatters': {
         'simple': {
-            'format': '%(asctime)s  -  %(levelname)-5s  -  %(module)s:%(funcName)s:%(lineno)d  -  %(message)s',
-            'format': '%(asctime)s  -  %(levelname)-5s  -  %(module)s:%(funcName)s:%(lineno)d  -  %(message)s',
+            'format': '%(asctime)s  -  %(levelname)-8s  -  %(module)s:%(funcName)s:%(lineno)d  -  %(message)s',
         },
     },
     'handlers': {
@@ -840,3 +850,5 @@ LOGGING = {
 }
 
 TRAKT_BULK_PAGE_SIZE = config("TRAKT_BULK_PAGE_SIZE", default="1000")
+PLEX_WATCH_SYNC = config("PLEX_WATCH_SYNC", default=False)
+PLEX_HOST = config("PLEX_HOST", default=None)

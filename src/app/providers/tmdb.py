@@ -152,7 +152,7 @@ def movie(media_id):
         url = f"{base_url}/movie/{media_id}"
         params = {
             **base_params,
-            "append_to_response": "recommendations,external_ids",
+            "append_to_response": "recommendations,external_ids,credits",
         }
 
         try:
@@ -204,6 +204,9 @@ def movie(media_id):
                 "country": get_country(response["production_countries"]),
                 "languages": get_languages(response["spoken_languages"]),
             },
+            "cast": get_cast_credits(response.get("credits", {})),
+            "crew": get_crew_credits(response.get("credits", {})),
+            "studios_full": get_companies_full(response.get("production_companies")),
             "related": {
                 collection_response.get("name", "collection"): collection_items,
                 "recommendations": get_related(
@@ -262,7 +265,7 @@ def enrich_season_with_tv_data(season_data, tv_data, media_id, season_number):
 def fetch_and_cache_seasons(media_id, season_numbers, tv_data):
     """Fetch uncached seasons from API and cache them."""
     url = f"{base_url}/tv/{media_id}"
-    base_append = "recommendations,external_ids"
+    base_append = "recommendations,external_ids,aggregate_credits"
     max_seasons_per_request = 18
     fetched_tv_data = tv_data
     result_data = {}
@@ -358,7 +361,7 @@ def tv(media_id):
         url = f"{base_url}/tv/{media_id}"
         params = {
             **base_params,
-            "append_to_response": "recommendations,external_ids",
+            "append_to_response": "recommendations,external_ids,aggregate_credits",
         }
 
         try:
@@ -406,6 +409,15 @@ def process_tv(response):
             "country": get_country(response["production_countries"]),
             "languages": get_languages(response["spoken_languages"]),
         },
+        "cast": get_cast_credits(
+            response.get("aggregate_credits", {}),
+            is_aggregate=True,
+        ),
+        "crew": get_crew_credits(
+            response.get("aggregate_credits", {}),
+            is_aggregate=True,
+        ),
+        "studios_full": get_companies_full(response.get("production_companies")),
         "related": {
             "seasons": get_related(
                 response["seasons"],
@@ -617,6 +629,147 @@ def get_companies(companies):
     return None
 
 
+def get_profile_image_url(path, size="w185"):
+    """Return a profile image URL for cast/crew members."""
+    if path:
+        return f"https://image.tmdb.org/t/p/{size}{path}"
+    return settings.IMG_NONE
+
+
+def _upgrade_person_image_url(url):
+    """Upgrade legacy person profile URLs to a higher-resolution size."""
+    if not url:
+        return url
+    if "/t/p/w185/" in url:
+        return url.replace("/t/p/w185/", "/t/p/h632/")
+    return url
+
+
+def get_gender(value):
+    """Normalize TMDB gender integer into a stable string."""
+    if value == 1:
+        return "female"
+    if value == 2:
+        return "male"
+    if value == 3:
+        return "non_binary"
+    return "unknown"
+
+
+def get_cast_credits(credits_data, is_aggregate=False):
+    """Return normalized cast entries."""
+    cast_entries = []
+    cast_list = credits_data.get("cast", []) if isinstance(credits_data, dict) else []
+
+    for cast in cast_list:
+        role_value = cast.get("character", "")
+        if is_aggregate:
+            roles = cast.get("roles", []) or []
+            if roles:
+                top_role = max(roles, key=lambda role: role.get("episode_count") or 0)
+                role_value = top_role.get("character") or role_value
+
+        cast_entries.append(
+            {
+                "person_id": str(cast.get("id")),
+                "name": cast.get("name", ""),
+                "image": get_profile_image_url(cast.get("profile_path")),
+                "known_for_department": cast.get("known_for_department", ""),
+                "gender": get_gender(cast.get("gender")),
+                "department": cast.get("known_for_department", "Acting"),
+                "role": role_value or "",
+                "order": cast.get("order"),
+            },
+        )
+
+    cast_entries.sort(key=lambda row: (row.get("order") is None, row.get("order") or 999999))
+    return cast_entries
+
+
+def get_crew_credits(credits_data, is_aggregate=False):
+    """Return normalized crew entries."""
+    crew_entries = []
+    crew_list = credits_data.get("crew", []) if isinstance(credits_data, dict) else []
+
+    for crew in crew_list:
+        department = crew.get("department", "")
+
+        if is_aggregate:
+            jobs = crew.get("jobs", []) or []
+            if not jobs:
+                crew_entries.append(
+                    {
+                        "person_id": str(crew.get("id")),
+                        "name": crew.get("name", ""),
+                        "image": get_profile_image_url(crew.get("profile_path")),
+                        "known_for_department": crew.get("known_for_department", ""),
+                        "gender": get_gender(crew.get("gender")),
+                        "department": department,
+                        "role": "",
+                        "order": crew.get("order"),
+                    },
+                )
+                continue
+
+            seen_jobs = set()
+            for job_data in jobs:
+                job_name = (job_data.get("job") or "").strip()
+                if not job_name or job_name.lower() in seen_jobs:
+                    continue
+                seen_jobs.add(job_name.lower())
+                crew_entries.append(
+                    {
+                        "person_id": str(crew.get("id")),
+                        "name": crew.get("name", ""),
+                        "image": get_profile_image_url(crew.get("profile_path")),
+                        "known_for_department": crew.get("known_for_department", ""),
+                        "gender": get_gender(crew.get("gender")),
+                        "department": department or job_data.get("department", ""),
+                        "role": job_name,
+                        "order": crew.get("order"),
+                    },
+                )
+            continue
+
+        crew_entries.append(
+            {
+                "person_id": str(crew.get("id")),
+                "name": crew.get("name", ""),
+                "image": get_profile_image_url(crew.get("profile_path")),
+                "known_for_department": crew.get("known_for_department", ""),
+                "gender": get_gender(crew.get("gender")),
+                "department": department,
+                "role": crew.get("job", "") or "",
+                "order": crew.get("order"),
+            },
+        )
+
+    crew_entries.sort(
+        key=lambda row: (
+            row.get("department", "").lower(),
+            row.get("order") is None,
+            row.get("order") or 999999,
+        ),
+    )
+    return crew_entries
+
+
+def get_companies_full(companies):
+    """Return normalized studio/company entries."""
+    studios = []
+    for company in companies or []:
+        studios.append(
+            {
+                "studio_id": str(company.get("id")),
+                "name": company.get("name", ""),
+                "logo": get_profile_image_url(company.get("logo_path")),
+                "origin_country": company.get("origin_country", ""),
+            },
+        )
+    studios.sort(key=lambda row: row.get("name", "").lower())
+    return studios
+
+
 def get_score(score):
     """Return the score for the media with one decimal place."""
     # when unknown score, value from response is 0.0
@@ -685,6 +838,129 @@ def get_collection(collection_response):
         }
         for media in parts
     ]
+
+
+def _person_filmography_entries(combined_credits):
+    """Normalize cast and crew filmography entries."""
+    entries = []
+    cast = combined_credits.get("cast", []) if isinstance(combined_credits, dict) else []
+    crew = combined_credits.get("crew", []) if isinstance(combined_credits, dict) else []
+
+    for media in cast:
+        media_type = media.get("media_type")
+        if media_type not in (MediaTypes.MOVIE.value, MediaTypes.TV.value):
+            continue
+        entries.append(
+            {
+                "media_id": str(media.get("id")),
+                "source": Sources.TMDB.value,
+                "media_type": media_type,
+                "title": get_title(media),
+                "image": get_image_url(media.get("poster_path")),
+                "year": get_year(media),
+                "release_date": get_start_date(
+                    media.get("release_date") or media.get("first_air_date"),
+                ),
+                "credit_type": "cast",
+                "role": media.get("character") or "",
+                "department": "Acting",
+            },
+        )
+
+    for media in crew:
+        media_type = media.get("media_type")
+        if media_type not in (MediaTypes.MOVIE.value, MediaTypes.TV.value):
+            continue
+        entries.append(
+            {
+                "media_id": str(media.get("id")),
+                "source": Sources.TMDB.value,
+                "media_type": media_type,
+                "title": get_title(media),
+                "image": get_image_url(media.get("poster_path")),
+                "year": get_year(media),
+                "release_date": get_start_date(
+                    media.get("release_date") or media.get("first_air_date"),
+                ),
+                "credit_type": "crew",
+                "role": media.get("job") or "",
+                "department": media.get("department") or "",
+            },
+        )
+
+    # Deduplicate by media + credit + role in case TMDB returns duplicates.
+    deduped = {}
+    for entry in entries:
+        key = (
+            entry["media_type"],
+            entry["media_id"],
+            entry["credit_type"],
+            entry["role"],
+        )
+        if key not in deduped:
+            deduped[key] = entry
+
+    filmography = list(deduped.values())
+    filmography.sort(
+        key=lambda entry: (
+            entry.get("release_date") is None,
+            entry.get("release_date") or 0,
+            entry.get("year") or 0,
+        ),
+        reverse=True,
+    )
+    return filmography
+
+
+def person(person_id):
+    """Return metadata for a TMDB person profile."""
+    cache_key = f"{Sources.TMDB.value}_person_{person_id}"
+    data = cache.get(cache_key)
+
+    if data is not None:
+        upgraded_image = _upgrade_person_image_url(data.get("image"))
+        if upgraded_image != data.get("image"):
+            data = {**data, "image": upgraded_image}
+            cache.set(cache_key, data)
+        return data
+
+    url = f"{base_url}/person/{person_id}"
+    params = {
+        **base_params,
+        "append_to_response": "combined_credits,external_ids",
+    }
+    try:
+        response = services.api_request(
+            Sources.TMDB.value,
+            "GET",
+            url,
+            params=params,
+        )
+    except requests.exceptions.HTTPError as error:
+        handle_error(error)
+
+    data = {
+        "person_id": str(response.get("id")),
+        "source": Sources.TMDB.value,
+        "name": response.get("name", ""),
+        "image": get_profile_image_url(
+            response.get("profile_path"),
+            size="h632",
+        ),
+        "biography": response.get("biography") or "",
+        "known_for_department": response.get("known_for_department") or "",
+        "gender": get_gender(response.get("gender")),
+        "birth_date": response.get("birthday"),
+        "death_date": response.get("deathday"),
+        "place_of_birth": response.get("place_of_birth") or "",
+        "filmography": _person_filmography_entries(
+            response.get("combined_credits", {}),
+        ),
+    }
+
+    cache.set(cache_key, data)
+
+    return data
 
 
 def process_episodes(season_metadata, episodes_in_db):
@@ -756,30 +1032,49 @@ def find_next_episode(episode_number, episodes_metadata):
 
 def episode(media_id, season_number, episode_number):
     """Return the metadata for the selected episode from The Movie Database."""
-    tv_metadata = tv_with_seasons(media_id, [season_number])
-    season_metadata = tv_metadata[f"season/{season_number}"]
-
-    for episode in season_metadata["episodes"]:
-        if episode["episode_number"] == int(episode_number):
-            return {
-                "title": season_metadata["title"],
-                "season_title": season_metadata["season_title"],
-                "episode_title": episode["name"],
-                "image": get_image_url(episode["still_path"]),
-            }
-
-    # Episode not found - throw ProviderAPIError
-    msg = (
-        f"Episode {episode_number} not found in season {season_number} "
-        f"for {Sources.TMDB.label} with ID {media_id}"
+    cache_key = (
+        f"{Sources.TMDB.value}_{MediaTypes.EPISODE.value}_{media_id}_{season_number}_{episode_number}"
     )
-    # Create a new response object with 404 status
-    not_found_response = requests.Response()
-    not_found_response.status_code = 404
-    # Set the error attribute to match what ProviderAPIError expects
-    not_found_error = type("Error", (), {"response": not_found_response})
-    raise services.ProviderAPIError(
-        Sources.TMDB.value,
-        error=not_found_error,
-        details=msg,
-    )
+    data = cache.get(cache_key)
+
+    if data is None:
+        url = f"{base_url}/tv/{media_id}/season/{season_number}/episode/{episode_number}"
+        params = {
+            **base_params,
+            "append_to_response": "credits",
+        }
+        try:
+            response = services.api_request(
+                Sources.TMDB.value,
+                "GET",
+                url,
+                params=params,
+            )
+        except requests.exceptions.HTTPError as error:
+            handle_error(error)
+
+        tv_metadata = tv_with_seasons(media_id, [season_number])
+        season_metadata = tv_metadata.get(f"season/{season_number}", {})
+
+        # TMDB episode payload exposes both regular cast and guest stars.
+        # Prefer guest stars for episode-level crediting to avoid attributing
+        # season-regular cast to every episode when episode-specific guests exist.
+        cast_rows = response.get("guest_stars", []) or []
+        if not cast_rows:
+            cast_rows = response.get("credits", {}).get("cast", []) or []
+
+        crew_rows = response.get("credits", {}).get("crew", [])
+        if not crew_rows:
+            crew_rows = response.get("crew", []) or []
+
+        data = {
+            "title": season_metadata.get("title") or tv_metadata.get("title") or "",
+            "season_title": season_metadata.get("season_title") or f"Season {season_number}",
+            "episode_title": response.get("name") or f"Episode {episode_number}",
+            "image": get_image_url(response.get("still_path")),
+            "cast": get_cast_credits({"cast": cast_rows}),
+            "crew": get_crew_credits({"crew": crew_rows}),
+        }
+        cache.set(cache_key, data)
+
+    return data

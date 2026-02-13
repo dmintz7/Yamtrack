@@ -12,6 +12,7 @@ from unidecode import unidecode
 from app import config
 from app.models import MediaTypes, Sources, Status
 from users.models import TimeFormatChoices
+from users.templatetags.user_tags import user_date_format, user_time_format
 
 register = template.Library()
 
@@ -74,10 +75,7 @@ def date_format(datetime, user):
         datetime: The datetime object to format
         user: User object to get preferred date format
     """
-    if not datetime:
-        return None
-    local_dt = timezone.localtime(datetime)
-    return formats.date_format(local_dt, user.date_format)
+    return user_date_format(datetime, user)
 
 
 @register.filter
@@ -97,10 +95,7 @@ def iso_date_format(value, user):
 @register.filter
 def time_format(datetime, user):
     """Format a datetime using user's preferred time format (time only, no date)."""
-    if not datetime:
-        return None
-    local_dt = timezone.localtime(datetime)
-    return formats.time_format(local_dt, user.time_format)
+    return user_time_format(datetime, user)
 
 
 @register.filter
@@ -115,13 +110,38 @@ def datetime_format(datetime, user):
     """
     if not datetime:
         return None
-    local_dt = timezone.localtime(datetime)
-    formatted_date = formats.date_format(local_dt, user.date_format)
+    formatted_date = user_date_format(datetime, user)
 
     if settings.TRACK_TIME:
-        formatted_time = formats.time_format(local_dt, user.time_format)
-        return f"{formatted_date} {formatted_time}"
+        formatted_time = user_time_format(datetime, user)
+        if formatted_time:
+            return f"{formatted_date} {formatted_time}"
     return formatted_date
+
+
+@register.filter
+def rating_scale_max(user):
+    """Return the user's rating scale max (defaults to 10)."""
+    if not user:
+        return 10
+    try:
+        return user.rating_scale_max
+    except AttributeError:
+        return 10
+
+
+@register.filter
+def score_display(score, user):
+    """Format a score using the user's rating scale."""
+    if score is None:
+        return None
+    if not user:
+        return score
+    try:
+        formatted = user.format_score_for_display(score)
+    except AttributeError:
+        return score
+    return formatted if formatted is not None else score
 
 
 @register.filter

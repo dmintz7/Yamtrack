@@ -7,6 +7,8 @@ from django.urls import reverse
 from app.models import (
     Item,
     MediaTypes,
+    PodcastEpisode,
+    PodcastShow,
     Sources,
 )
 from integrations.models import PlexAccount
@@ -162,3 +164,121 @@ class MediaDetailsViewTests(TestCase):
         self.assertIsNone(response.context["item_id_for_polling"])
         mock_fetch_delay.assert_not_called()
 
+    @patch("app.providers.services.get_media_metadata")
+    def test_media_details_renders_cast_and_crew_links(self, mock_get_metadata):
+        """Movie details should render cast/crew links to person pages."""
+        mock_get_metadata.return_value = {
+            "media_id": "238",
+            "title": "Test Movie",
+            "media_type": MediaTypes.MOVIE.value,
+            "source": Sources.TMDB.value,
+            "source_url": "https://www.themoviedb.org/movie/238",
+            "image": "http://example.com/image.jpg",
+            "synopsis": "Test synopsis",
+            "details": {"format": "Movie"},
+            "cast": [
+                {
+                    "person_id": "10",
+                    "name": "John Actor",
+                    "role": "Hero",
+                },
+            ],
+            "crew": [
+                {
+                    "person_id": "11",
+                    "name": "Jane Director",
+                    "role": "Director",
+                    "department": "Directing",
+                },
+            ],
+            "studios_full": [
+                {
+                    "studio_id": "20",
+                    "name": "Studio One",
+                },
+            ],
+        }
+
+        response = self.client.get(
+            reverse(
+                "media_details",
+                kwargs={
+                    "source": Sources.TMDB.value,
+                    "media_type": MediaTypes.MOVIE.value,
+                    "media_id": "238",
+                    "title": "test-movie",
+                },
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "John Actor")
+        self.assertContains(response, "Jane Director")
+        self.assertContains(response, "Studio One")
+        self.assertContains(
+            response,
+            reverse(
+                "person_detail",
+                kwargs={
+                    "source": Sources.TMDB.value,
+                    "person_id": "10",
+                    "name": "john-actor",
+                },
+            ),
+        )
+
+    def test_podcast_media_details_renders_for_show_with_no_user_plays(self):
+        """Podcast details should render even when episodes have no play history."""
+        show = PodcastShow.objects.create(
+            podcast_uuid="itunes:1002937870",
+            title="Dear Hank & John",
+            author="Hank and John",
+            image="http://example.com/podcast.jpg",
+            rss_feed_url="",
+        )
+        PodcastEpisode.objects.create(
+            show=show,
+            episode_uuid="dhj-episode-1",
+            title="Episode One",
+            duration=3600,
+        )
+
+        response = self.client.get(
+            reverse(
+                "media_details",
+                kwargs={
+                    "source": Sources.POCKETCASTS.value,
+                    "media_type": MediaTypes.PODCAST.value,
+                    "media_id": show.podcast_uuid,
+                    "title": "dear-hank-john",
+                },
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Dear Hank &amp; John")
+        self.assertContains(response, "Episode One")
+
+    def test_podcast_episode_fragment_renders_for_show_with_no_user_plays(self):
+        """Podcast episode HTMX fragments should render when no play history exists."""
+        show = PodcastShow.objects.create(
+            podcast_uuid="itunes:1002937870",
+            title="Dear Hank & John",
+            author="Hank and John",
+            image="http://example.com/podcast.jpg",
+            rss_feed_url="",
+        )
+        PodcastEpisode.objects.create(
+            show=show,
+            episode_uuid="dhj-episode-2",
+            title="Episode Two",
+            duration=1800,
+        )
+
+        response = self.client.get(
+            reverse("podcast_episodes_api", kwargs={"show_id": show.id}),
+            {"format": "html", "page": 1, "page_size": 20},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Episode Two")

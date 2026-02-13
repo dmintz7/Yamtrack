@@ -311,10 +311,11 @@ def get_score_distribution(user_media):
     top_rated_per_type_count = 20  # Match the limit used in other cards
 
     counter = itertools.count()  # Ensures stable sorting for equal scores
-    score_range = range(11)
 
     # Infer user from user_media for fetching all entries
     user = _infer_user_from_user_media(user_media)
+    score_scale_max = user.rating_scale_max if user else 10
+    score_range = range(score_scale_max + 1)
 
     for media_type, media_list in user_media.items():
         score_counts = dict.fromkeys(score_range, 0)
@@ -509,6 +510,9 @@ def get_score_distribution(user_media):
         for entry_data in deduped_scored.values():
             media = entry_data["media"]
             score_value = entry_data["score"]
+            score_value_scaled = float(score_value)
+            if score_scale_max == 5:
+                score_value_scaled = score_value_scaled / 2
 
             # Add to global top rated (for backward compatibility)
             if len(top_rated) < top_rated_count:
@@ -534,10 +538,12 @@ def get_score_distribution(user_media):
                     (float(score_value), next(type_counter), media),
                 )
 
-            binned_score = int(score_value)
+            binned_score = int(score_value_scaled)
+            if binned_score > score_scale_max:
+                binned_score = score_scale_max
             score_counts[binned_score] += 1
             total_scored += 1
-            total_score_sum += score_value
+            total_score_sum += score_value_scaled
 
         distribution[media_type] = score_counts
 
@@ -569,6 +575,7 @@ def get_score_distribution(user_media):
         ],
         "average_score": average_score,
         "total_scored": total_scored,
+        "scale_max": score_scale_max,
     }, top_rated_media, top_rated_by_type
 
 
@@ -1373,8 +1380,8 @@ def _get_season_metadata_with_episodes(media, season, logger):
         episodes_in_db = season.episodes.all()
 
         # Process episodes through TMDB to get runtime data
-        from app.providers import tmdb
-        season_metadata["episodes"] = tmdb.process_episodes(
+        from app.providers import get_tv_provider
+        season_metadata["episodes"] = get_tv_provider(media.item.source).process_episodes(
             season_metadata,
             episodes_in_db,
         )

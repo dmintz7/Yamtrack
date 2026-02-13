@@ -1,7 +1,10 @@
 import secrets
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 from django_celery_beat.models import PeriodicTask
 from django_celery_results.models import TaskResult
 
@@ -117,6 +120,13 @@ class TimeFormatChoices(models.TextChoices):
     HH_MM_SS = "hh_mm_ss", "24-hour with seconds (HH:mm:ss)"
 
 
+class RatingScaleChoices(models.TextChoices):
+    """Choices for rating scale preferences."""
+
+    TEN = "10", "1-10 stars"
+    FIVE = "5", "1-5 stars"
+
+
 class ActivityHistoryViewChoices(models.TextChoices):
     """Choices for which activity history view to show on the statistics page."""
 
@@ -138,6 +148,14 @@ class StatisticsRangeChoices(models.TextChoices):
     LAST_6_MONTHS = "Last 6 Months", "Last 6 Months"
     LAST_12_MONTHS = "Last 12 Months", "Last 12 Months"
     ALL_TIME = "All Time", "All Time"
+
+
+class TopTalentSortChoices(models.TextChoices):
+    """Choices for sorting top cast/crew/studio cards on statistics."""
+
+    PLAYS = "plays", "Plays"
+    TIME = "time", "Time"
+    TITLES = "titles", "Titles"
 
 
 class GameLoggingStyleChoices(models.TextChoices):
@@ -491,6 +509,12 @@ class User(AbstractUser):
         choices=QuickWatchDateChoices.choices,
         help_text="Date to use when bulk-marking media as completed",
     )
+    rating_scale = models.CharField(
+        max_length=2,
+        default=RatingScaleChoices.TEN,
+        choices=RatingScaleChoices.choices,
+        help_text="Preferred rating scale for user scores",
+    )
     date_format = models.CharField(
         max_length=20,
         default=DateFormatChoices.ISO_8601,
@@ -558,6 +582,26 @@ class User(AbstractUser):
         blank=True,
         help_text="Comma-separated list of Plex usernames for webhook matching",
     )
+    plex_webhook_last_received_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="Timestamp of the last Plex webhook received",
+    )
+    plex_webhook_last_error = models.TextField(
+        blank=True,
+        default="",
+        help_text="Last Plex webhook error message",
+    )
+    plex_webhook_last_error_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="Timestamp of the last Plex webhook error",
+    )
+    plex_webhook_token_rotated_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="When the API token was regenerated (update webhook URLs)",
+    )
 
     jellyseerr_enabled = models.BooleanField(
         default=False,
@@ -608,6 +652,12 @@ class User(AbstractUser):
         default=StatisticsRangeChoices.LAST_12_MONTHS,
         choices=StatisticsRangeChoices.choices,
         help_text="Default predefined range for the Statistics page",
+    )
+    top_talent_sort_by = models.CharField(
+        max_length=20,
+        default=TopTalentSortChoices.PLAYS,
+        choices=TopTalentSortChoices.choices,
+        help_text="Sort metric for top cast/crew/studio cards on the Statistics page",
     )
 
     activity_history_view = models.CharField(
@@ -784,6 +834,10 @@ class User(AbstractUser):
                 condition=models.Q(statistics_default_range__in=StatisticsRangeChoices.values),
             ),
             models.CheckConstraint(
+                name="top_talent_sort_by_valid",
+                condition=models.Q(top_talent_sort_by__in=TopTalentSortChoices.values),
+            ),
+            models.CheckConstraint(
                 name="list_detail_sort_valid",
                 condition=models.Q(list_detail_sort__in=ListDetailSortChoices.values),
             ),
@@ -855,6 +909,10 @@ class User(AbstractUser):
                 name="quick_watch_date_valid",
                 condition=models.Q(quick_watch_date__in=QuickWatchDateChoices.values),
             ),
+            models.CheckConstraint(
+                name="rating_scale_valid",
+                condition=models.Q(rating_scale__in=RatingScaleChoices.values),
+            ),
         ]
 
     def update_preference(self, field_name, new_value):
@@ -895,6 +953,57 @@ class User(AbstractUser):
             self.save(update_fields=[field_name])
 
         return new_value
+
+    @property
+    def rating_scale_max(self):
+        """Return the max rating value for the user's configured scale."""
+        try:
+            return int(self.rating_scale)
+        except (TypeError, ValueError):
+            return 10
+
+    def _coerce_score_decimal(self, score):
+        """Coerce a score into a Decimal, returning None on failure."""
+        if score is None:
+            return None
+        if isinstance(score, Decimal):
+            return score
+        try:
+            return Decimal(str(score))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+
+    def scale_score_for_display(self, score):
+        """Convert internal scores (0-10) to the user's display scale."""
+        score_decimal = self._coerce_score_decimal(score)
+        if score_decimal is None:
+            return None
+        if self.rating_scale_max == 5:
+            score_decimal = score_decimal / Decimal("2")
+        return score_decimal.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+
+    def scale_score_for_storage(self, score):
+        """Convert display scores to internal 0-10 scale for storage."""
+        score_decimal = self._coerce_score_decimal(score)
+        if score_decimal is None:
+            return None
+        if self.rating_scale_max == 5:
+            score_decimal = score_decimal * Decimal("2")
+        score_decimal = score_decimal.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        if score_decimal < 0:
+            return Decimal("0")
+        if score_decimal > 10:
+            return Decimal("10")
+        return score_decimal
+
+    def format_score_for_display(self, score):
+        """Return score formatted for display based on rating scale."""
+        score_decimal = self.scale_score_for_display(score)
+        if score_decimal is None:
+            return None
+        if score_decimal == score_decimal.to_integral_value():
+            return int(score_decimal)
+        return float(score_decimal)
 
     def resolve_watch_date(self, now, release_date):
         """
@@ -971,14 +1080,15 @@ class User(AbstractUser):
             "anilist": "Import from AniList",
             "kitsu": "Import from Kitsu",
             "yamtrack": "Import from Yamtrack",
-        "hltb": "Import from HowLongToBeat",
-        "steam": "Import from Steam",
-        "imdb": "Import from IMDB",
-        "goodreads": "Import from GoodReads",
-        "plex": "Import from Plex",
-        "pocketcasts": "Import from Pocket Casts (Recurring)",
-        "lastfm": "Poll Last.fm for all users",
-    }
+            "hltb": "Import from HowLongToBeat",
+            "steam": "Import from Steam",
+            "imdb": "Import from IMDB",
+            "goodreads": "Import from GoodReads",
+            "plex": f"Import from Plex{' (Recurring)' if getattr(settings, 'PLEX_WATCH_SYNC', False) else ''}",
+            "pocketcasts": "Import from Pocket Casts (Recurring)",
+            "lastfm": "Poll Last.fm for all users",
+            "unresolved_import": "Process Unresolved Imports",
+        }
 
         # Reverse mapping to get source from task name
         task_to_source = {v: k for k, v in import_tasks.items()}
@@ -1099,4 +1209,33 @@ class User(AbstractUser):
     def regenerate_token(self):
         """Regenerate the user's token."""
         self.token = generate_token()
-        self.save(update_fields=["token"])
+        self.plex_webhook_token_rotated_at = timezone.now()
+        self.save(update_fields=["token", "plex_webhook_token_rotated_at"])
+
+    def mark_plex_webhook_received(self, when=None):
+        """Record a successful Plex webhook delivery."""
+        when = when or timezone.now()
+        self.plex_webhook_last_received_at = when
+        self.plex_webhook_last_error = ""
+        self.plex_webhook_last_error_at = None
+        self.plex_webhook_token_rotated_at = None
+        self.save(
+            update_fields=[
+                "plex_webhook_last_received_at",
+                "plex_webhook_last_error",
+                "plex_webhook_last_error_at",
+                "plex_webhook_token_rotated_at",
+            ],
+        )
+
+    def mark_plex_webhook_error(self, message, when=None):
+        """Record a Plex webhook error for UI visibility."""
+        when = when or timezone.now()
+        self.plex_webhook_last_error = message
+        self.plex_webhook_last_error_at = when
+        self.save(
+            update_fields=[
+                "plex_webhook_last_error",
+                "plex_webhook_last_error_at",
+            ],
+        )

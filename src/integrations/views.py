@@ -111,7 +111,8 @@ def import_trakt_public(request):
 
 @require_POST
 def plex_connect(request):
-    """Initiate Plex authentication via the pin-based flow."""
+    """Initiate Plex authentication via the pin-based flow. """
+    """If PLEX_WATCH enabled, recurring task is created"""
     redirect_uri = request.build_absolute_uri(reverse("plex_callback"))
     state_token = secrets.token_urlsafe(16)
 
@@ -130,6 +131,7 @@ def plex_connect(request):
     }
 
     auth_url = plex_api.build_auth_url(pin["code"], f"{redirect_uri}?state={state_token}")
+
     return redirect(auth_url)
 
 
@@ -208,13 +210,60 @@ def plex_callback(request):
     )
 
     account_username = account.get("username") or "your Plex account"
-    messages.success(request, f"Connected to Plex as {account_username}.")
+    if getattr(settings, "PLEX_WATCH_SYNC", False):
+        try:
+            from django_celery_beat.models import CrontabSchedule, PeriodicTask
+
+            # Create 2-hour recurring task if it doesn't exist
+            existing_task = PeriodicTask.objects.filter(
+                task="Import from Plex  (Recurring)",
+                kwargs__contains=f'"user_id": {request.user.id}',
+                enabled=True,
+            ).first()
+
+            if not existing_task:
+                crontab, _ = CrontabSchedule.objects.get_or_create(
+                    minute=0,
+                    hour="*/2",
+                    day_of_week="*",
+                    day_of_month="*",
+                    month_of_year="*",
+                    timezone=timezone.get_default_timezone(),
+                )
+
+                task_name = f"Import from Plex for {request.user.username} (every 2 hours)"
+                PeriodicTask.objects.create(
+                    name=task_name,
+                    task="Import from Plex (Recurring)",
+                    crontab=crontab,
+                    kwargs=json.dumps({"user_id": request.user.id, "mode": "new"}),
+                    start_time=timezone.now(),
+                    enabled=True,
+                )
+
+            tasks.import_plex_history.delay(user_id=request.user.id, mode="all")
+
+            messages.success(request, "Connected to Plex successfully. Initial import queued. Recurring imports will run every 2 hours.")
+        except Exception as e:
+            messages.error(request, f"Failed to connect Plex: {e}")
+    else:
+        messages.success(request, f"Connected to Plex as {account_username}.")
+
     return redirect("import_data")
 
 
 @require_POST
 def plex_disconnect(request):
     """Remove stored Plex credentials."""
+    from django_celery_beat.models import PeriodicTask
+
+    PeriodicTask.objects.filter(
+        task="Import from Plex (Recurring)",
+        kwargs__contains=f'"user_id": {request.user.id}',
+    ).delete()
+
+    # Clear all credentials (full disconnect)
+    PocketCastsAccount.objects.filter(user=request.user).delete()
     PlexAccount.objects.filter(user=request.user).delete()
     messages.info(request, "Disconnected Plex.")
     return redirect("import_data")
@@ -911,6 +960,28 @@ def import_goodreads(request):
     return redirect("import_data")
 
 
+@require_POST
+def import_hardcover(request):
+    """View for importing books data from Hardcover CSV."""
+    file = request.FILES.get("hardcover_csv")
+
+    if not file:
+        messages.error(request, "Hardcover CSV file is required.")
+        return redirect("import_data")
+
+    mode = request.POST["mode"]
+    tasks.import_hardcover.delay(
+        file=request.FILES["hardcover_csv"],
+        user_id=request.user.id,
+        mode=mode,
+    )
+    messages.info(
+        request,
+        "The task to import media from Hardcover CSV file has been queued.",
+    )
+    return redirect("import_data")
+
+
 @require_GET
 def export_csv(request):
     """View for exporting all media data to a CSV file."""
@@ -976,14 +1047,30 @@ def plex_webhook(request, token):
     data = request.POST.get("payload")
     if not data:
         logger.warning("Missing payload in Plex webhook request")
+        user.mark_plex_webhook_error("Missing payload in Plex webhook request")
         return HttpResponse("Missing payload", status=400)
 
-    payload = json.loads(data)
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        logger.warning("Invalid JSON payload in Plex webhook request")
+        user.mark_plex_webhook_error("Invalid JSON payload in Plex webhook request")
+        return HttpResponse("Invalid payload", status=400)
+
     event_type = payload.get("event")
     logger.info("Received Plex webhook request - Event: %s, User: %s", event_type, user.username)
     
     processor = plex_webhooks.PlexWebhookProcessor()
-    processor.process_payload(payload, user)
+    try:
+        processor.process_payload(payload, user)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("Error processing Plex webhook payload")
+        user.mark_plex_webhook_error(
+            "Plex webhook processing failed. Check server logs for details.",
+        )
+        return HttpResponse("Webhook processing failed", status=500)
+
+    user.mark_plex_webhook_received()
     return HttpResponse(status=200)
 
 
@@ -1048,3 +1135,90 @@ def jellyseerr_webhook(request, token):
     processor = jellyseerr_webhooks.JellyseerrWebhookProcessor()
     processor.process_payload(payload, user)
     return HttpResponse(status=200)
+
+
+@require_POST
+def process_unresolved_import(request):
+    """
+    View for queuing reprocessing of unresolved media via Celery.
+    """
+    from integrations import tasks
+    try:
+        tasks.process_unresolved_imports.delay(user_id=request.user.id, username=request.user.username)
+        messages.info(request, "Processing of unresolved imports has been queued.")
+        logger.info("User %s queued unresolved media processing.", request.user.username)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error(
+            "Failed to queue unresolved media processing for user %s: %s",
+            request.user.username,
+            exc,
+        )
+        messages.error(request, f"Failed to queue unresolved imports: {exc}")
+
+    return redirect("import_data")
+
+@require_POST
+def import_plex_sync(request):
+    """
+    Queue a Plex history import for the current user.
+
+    Plex watch-sync always uses mode="new" and runs every 2 hours automatically.
+    First import is "new", subsequent recurring imports are also "new".
+    """
+    plex_account = getattr(request.user, "plex_account", None)
+    if not plex_account:
+        messages.error(request, "Connect Plex before importing.")
+        return redirect("import_data")
+
+    # Refresh from DB to get latest status
+    plex_account.refresh_from_db()
+
+    # Allow sync even if connection is broken - importer will attempt refresh
+
+    # Check if this is the first import (no existing schedule)
+    from django_celery_beat.models import PeriodicTask, CrontabSchedule
+
+    existing_task = PeriodicTask.objects.filter(
+        task="Import from Plex (Recurring)",
+        kwargs__contains=f'"user_id": {request.user.id}',
+        enabled=True,
+    ).first()
+
+    # Always use mode="new" for Plex watch-sync
+    # mode = "new"
+
+    if not existing_task:
+        # First import - run immediately, then set up 2-hour schedule
+        tasks.import_plex.delay(user_id=request.user.id,)
+        messages.info(request, "The task to import media from Plex has been queued. Recurring imports will run every 2 hours.")
+
+        # Set up 2-hour recurring schedule
+        crontab, _ = CrontabSchedule.objects.get_or_create(
+            minute=0,
+            hour="*/2",
+            day_of_week="*",
+            day_of_month="*",
+            month_of_year="*",
+            timezone=timezone.get_default_timezone(),
+        )
+
+        task_name = f"Import from Plex for {request.user.username} (every 2 hours)"
+        PeriodicTask.objects.create(
+            name=task_name,
+            task="Import from Plex (Recurring)",
+            crontab=crontab,
+            kwargs=json.dumps({
+                "user_id": request.user.id,
+            }),
+            start_time=timezone.now(),
+            enabled=True,
+        )
+    else:
+        # Just run a manual import
+        tasks.import_plex_history.delay(
+            user_id=request.user.id,
+            mode="all"
+        )
+        messages.info(request, "The task to import media from Plex has been queued.")
+
+    return redirect("import_data")

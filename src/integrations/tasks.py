@@ -16,6 +16,7 @@ from app.templatetags import app_tags
 from integrations.imports import (
     anilist,
     goodreads,
+    hardcover,
     helpers,
     hltb,
     imdb,
@@ -213,6 +214,12 @@ def import_goodreads(file, user_id, mode):
     return import_media(goodreads.importer, file, user_id, mode)
 
 
+@shared_task(name="Import from Hardcover")
+def import_hardcover(file, user_id, mode):
+    """Celery task for importing media data from Hardcover."""
+    return import_media(hardcover.importer, file, user_id, mode)
+
+
 @shared_task(name="Import from Plex")
 def import_plex(library, user_id, mode, username=None):  # noqa: ARG001
     """Celery task for importing media data from Plex."""
@@ -230,6 +237,11 @@ def import_pocketcasts_history(user_id):
     """Recurring import task for Pocket Casts (called every 2 hours via Celery beat)."""
     return import_pocketcasts.delay(user_id, mode="new")
 
+
+@shared_task(name="Import from Plex (Recurring)")
+def import_plex_history(user_id, mode):
+    """Recurring import task for Pocket Casts (called every 2 hours via Celery beat)."""
+    return import_media(plex.watch_sync, None, user_id, mode)
 
 @shared_task(name="Poll Last.fm for all users")
 def poll_all_lastfm_scrobbles():
@@ -2045,3 +2057,26 @@ def update_collection_metadata_from_plex(library, user_id):
         "errors": error_count,
         "message": f"Updated collection metadata for {updated_count} items",
     }
+
+
+@shared_task(name="Process Unresolved Imports")
+def process_unresolved_imports(user_id, username=None):
+    from integrations.imports.helpers import initiate_unresolved_import
+
+    """
+    Celery task to reprocess unresolved media for a user.
+    """
+    User = get_user_model()
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        logger.warning("process_unresolved_imports task: user %s does not exist", user_id)
+        return {"success": 0, "failed": 0}
+
+    # Call the helper function"
+    logger.info("Starting unresolved media reprocessing for user %s", user.username)
+    result, warnings = initiate_unresolved_import(user)
+
+    logger.info(f"Successfully reprocessed {len(result)} records for user %s: success=%s")
+
+    return format_import_message(result, warnings)

@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from django_celery_beat.models import PeriodicTask
 
+from app import history_cache, statistics_cache
 from app.models import Item, MediaTypes, Status
 from app.templatetags import app_tags
 from integrations import plex
@@ -28,6 +29,8 @@ from users.models import (
     MobileGridLayoutChoices,
     PlannedHomeDisplayChoices,
     QuickWatchDateChoices,
+    RatingScaleChoices,
+    TopTalentSortChoices,
     TimeFormatChoices,
 )
 
@@ -370,10 +373,14 @@ def preferences(request):
         game_logging_style = request.POST.get("game_logging_style")
         mobile_grid_layout = request.POST.get("mobile_grid_layout")
         media_card_subtitle_display = request.POST.get("media_card_subtitle_display")
+        top_talent_sort_by = request.POST.get("top_talent_sort_by")
+        rating_scale = request.POST.get("rating_scale")
         quick_season_update_mobile = request.POST.get("quick_season_update_mobile") == "1"
         book_comic_manga_progress_percentage = request.POST.get("book_comic_manga_progress_percentage") == "1"
 
         fields_to_update = []
+        rating_scale_changed = False
+        top_talent_sort_changed = False
 
         if date_format and date_format in [choice[0] for choice in DateFormatChoices.choices]:
             if request.user.date_format != date_format:
@@ -400,8 +407,6 @@ def preferences(request):
             if request.user.game_logging_style != game_logging_style:
                 request.user.game_logging_style = game_logging_style
                 fields_to_update.append("game_logging_style")
-                from app import history_cache
-
                 history_cache.invalidate_history_cache(request.user.id)
                 history_cache.schedule_history_refresh(request.user.id, game_logging_style, debounce_seconds=0)
 
@@ -421,6 +426,21 @@ def preferences(request):
             if request.user.media_card_subtitle_display != media_card_subtitle_display:
                 request.user.media_card_subtitle_display = media_card_subtitle_display
                 fields_to_update.append("media_card_subtitle_display")
+
+        if (
+            top_talent_sort_by
+            and top_talent_sort_by in [choice[0] for choice in TopTalentSortChoices.choices]
+        ):
+            if request.user.top_talent_sort_by != top_talent_sort_by:
+                request.user.top_talent_sort_by = top_talent_sort_by
+                fields_to_update.append("top_talent_sort_by")
+                top_talent_sort_changed = True
+
+        if rating_scale and rating_scale in [choice[0] for choice in RatingScaleChoices.choices]:
+            if request.user.rating_scale != rating_scale:
+                request.user.rating_scale = rating_scale
+                fields_to_update.append("rating_scale")
+                rating_scale_changed = True
 
         if request.user.quick_season_update_mobile != quick_season_update_mobile:
             request.user.quick_season_update_mobile = quick_season_update_mobile
@@ -452,6 +472,18 @@ def preferences(request):
         if fields_to_update:
             request.user.save(update_fields=fields_to_update)
             request.user.refresh_from_db()
+            if rating_scale_changed:
+                history_cache.invalidate_history_cache(
+                    request.user.id,
+                    force=True,
+                    logging_styles=("sessions", "repeats"),
+                )
+            if rating_scale_changed or top_talent_sort_changed:
+                statistics_cache.invalidate_statistics_cache(request.user.id)
+                statistics_cache.schedule_all_ranges_refresh(
+                    request.user.id,
+                    debounce_seconds=0,
+                )
         messages.success(request, "Preferences updated successfully.")
         return redirect("preferences")
 
@@ -468,7 +500,21 @@ def preferences(request):
 @require_GET
 def integrations(request):
     """Render the integrations settings page."""
-    return render(request, "users/integrations.html", {"user": request.user})
+    user = request.user
+    last_received = user.plex_webhook_last_received_at
+    rotated_at = user.plex_webhook_token_rotated_at
+    plex_webhook_needs_update = False
+    if rotated_at:
+        plex_webhook_needs_update = not last_received or last_received < rotated_at
+
+    return render(
+        request,
+        "users/integrations.html",
+        {
+            "user": user,
+            "plex_webhook_needs_update": plex_webhook_needs_update,
+        },
+    )
 
 
 @require_GET
