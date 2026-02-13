@@ -65,7 +65,7 @@ from app.models import (
     Status,
     Track,
 )
-from app.providers import manual, services, get_tv_provider
+from app.providers import manual, services, get_tv_provider, tmdb
 from app.services import music as sync_services
 from app.statistics import _parse_release_date_str
 from app.templatetags import app_tags
@@ -1849,6 +1849,7 @@ def media_details(
             episode_items_data = []
             episode_items_map = {}  # Map media_id to Item object
             initial_limit = 20
+            from app.models import Item
             for episode in episodes[:initial_limit]:
                 item, _ = Item.objects.get_or_create(
                     media_id=episode.episode_uuid,
@@ -2144,6 +2145,7 @@ def media_details(
         and media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value)
         and isinstance(media_metadata, dict)
     ):
+        from app.models import Item
         detail_item = Item.objects.filter(
             media_id=media_id,
             source=source,
