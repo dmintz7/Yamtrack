@@ -9,7 +9,7 @@ from django.utils.dateparse import parse_datetime
 from django_celery_beat.models import PeriodicTask
 
 import app
-from app.models import MediaTypes, Sources, Status, MetadataSources, ExternalID
+from app.models import MediaTypes, Sources, Status
 from app.providers import services
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
@@ -313,73 +313,18 @@ class TraktImporter:
                 msg = f"Error processing history entry: {entry}"
                 raise MediaImportUnexpectedError(msg) from e
 
-    def _get_metadata(self, media_type, source_key, source_id, title, season_number=None):
-        """Get metadata for a media item."""
-        try:
-            kwargs = {}
-            if season_number is not None:
-                kwargs["season_numbers"] = [season_number]
-
-            return services.get_media_metadata(
-                media_type,
-                source_id,
-                source_key,
-                **kwargs,
-            )
-        except KeyError as e:
-            if 'season/' in e.args[0]:
-                logger.debug(f"Ignoring unknown season {e.args[0]} for {source_key} {source_id} {title}")
-                return None
-            raise
-        except services.ProviderAPIError as error:
-            if error.status_code == requests.codes.not_found:
-                return None
-            raise
-
-    def _get_or_create_item(
-        self,
-        media_type,
-        source_key,
-        source_id,
-        metadata,
-        season_number=None,
-        episode_number=None,
-    ):
-        item_kwargs = {
-            "media_id": source_id,
-            "source": source_key,
-            "media_type": media_type,
-        }
-
-        if season_number is not None:
-            item_kwargs["season_number"] = season_number
-
-        if episode_number is not None:
-            item_kwargs["episode_number"] = episode_number
-
-        defaults = {
-            "title": metadata["title"],
-            "image": metadata["image"],
-        }
-
-        item, _ = app.models.Item.objects.get_or_create(
-            **item_kwargs,
-            defaults=defaults,
-        )
-
-        return item
 
     def process_watched_movie(self, entry):
         """Process a single movie watch event."""
         movie = entry["movie"]
-        metadata, source, source_id = self.get_metadata_by_priority(
+        metadata, source, source_id = helpers.get_metadata_by_priority(
             MediaTypes.MOVIE.value,
             movie.get("ids", {}),
             movie["title"],
         )
 
         if not metadata:
-            message = f"{movie['title']}: not found in {source.label} with ID {source_id}."
+            message = f"{movie['title']}: not found, {movie.get('ids', {})}."
             self.queue_unresolved_media("trakt", movie.get("ids", {}).get("trakt"), MediaTypes.MOVIE.value, entry, message)
             return
 
@@ -389,13 +334,13 @@ class TraktImporter:
             self.to_delete,
             MediaTypes.MOVIE.value,
             Sources.TMDB.value,
-            source_id,
+            str(source_id),
             self.mode,
         ):
             return
 
-        item = self._get_or_create_item(MediaTypes.MOVIE.value, source.value, source_id, metadata)
-        self.queue_trakt_external_ids(movie.get("ids", {}), item)
+        item = helpers.get_or_create_item(MediaTypes.MOVIE.value, source.value, source_id, metadata)
+        helpers.queue_external_ids(self.external_ids, movie.get("ids", {}), item)
 
         watched_at = entry["watched_at"]
 
@@ -432,13 +377,14 @@ class TraktImporter:
             return
 
         # --- Get metadata by priority for the show ---
-        tv_metadata, source, source_id = self.get_metadata_by_priority(
+        tv_metadata, source, source_id = helpers.get_metadata_by_priority(
             MediaTypes.TV.value,
             show.get("ids", {}),
             show.get("title"),
         )
-        if not tv_metadata or not source.value or not source_id:
-            message = f"{show['title']}: not found in {source.label} with ID {source_id}."
+        tv_key = f"{source_id}"
+        if not tv_metadata:
+            message = f"{show['title']}: not found {show.get('ids', {})}."
             self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
             return
 
@@ -448,7 +394,7 @@ class TraktImporter:
                 self.to_delete,
                 MediaTypes.TV.value,
                 source.value,
-                source_id,
+                tv_key,
                 self.mode,
         ):
             return
@@ -470,7 +416,7 @@ class TraktImporter:
                 episode_number = episode_by_id.get("episode_number", episode_number)
 
         # --- Get season metadata using priority ---
-        season_metadata, season_source, season_source_id = self.get_metadata_by_priority(
+        season_metadata, season_source, season_source_id = helpers.get_metadata_by_priority(
             MediaTypes.SEASON.value,
             show.get("ids", {}),
             show.get("title"),
@@ -478,14 +424,14 @@ class TraktImporter:
             source_found=source.value,
         )
         if not season_metadata:
-            if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
+            if not (found_info := helpers.TMDBResolver(trakt_data=entry, trakt_class=self).resolve()):
                 message = f"{show['title']} S{season_number}: not found in {source.label} with ID {source_id}."
                 self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
                 return
 
             season_number = found_info["season_number"]
             episode_number = found_info["episode_number"]
-            season_metadata, season_source, season_source_id = self.get_metadata_by_priority(
+            season_metadata, season_source, season_source_id = helpers.get_metadata_by_priority(
                 MediaTypes.SEASON.value,
                 show.get("ids", {}),
                 show.get("title"),
@@ -506,7 +452,7 @@ class TraktImporter:
             )
 
         if not episode_exists:
-            if not (found_info := helpers.TMDBResolver(entry, trakt_class=self).resolve()):
+            if not (found_info := helpers.TMDBResolver(trakt_data=entry, trakt_class=self).resolve()):
                 message = f"{show['title']} S{season_number}E{episode_number}: not found in {source.label} with ID {source_id}."
                 self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
                 return
@@ -524,9 +470,8 @@ class TraktImporter:
         watched_at = entry.get("watched_at")
 
         # --- Create or get TV show item ---
-        tv_item = self._get_or_create_item(MediaTypes.TV.value, source.value, source_id, tv_metadata)
-        self.queue_trakt_external_ids(show.get("ids", {}), tv_item)
-        tv_key = f"{source_id}"
+        tv_item = helpers.get_or_create_item(MediaTypes.TV.value, source.value, source_id, tv_metadata)
+        helpers.queue_external_ids(self.external_ids, show.get("ids", {}), tv_item)
         if tv_key not in self.media_instances[MediaTypes.TV.value]:
             tv_obj = app.models.TV(item=tv_item, user=self.user, status=Status.IN_PROGRESS.value)
             tv_obj._history_date = parse_datetime(watched_at)
@@ -536,7 +481,7 @@ class TraktImporter:
             tv_obj = self.media_instances[MediaTypes.TV.value][tv_key][0]
 
         # --- Create or get Season item ---
-        season_item = self._get_or_create_item(
+        season_item = helpers.get_or_create_item(
             MediaTypes.SEASON.value,
             tv_item.source,
             source_id,
@@ -559,7 +504,7 @@ class TraktImporter:
 
         # --- Create Episode item ---
         episode_metadata = {"title": tv_metadata["title"], "image": episode_image}
-        episode_item = self._get_or_create_item(
+        episode_item = helpers.get_or_create_item(
             MediaTypes.EPISODE.value,
             tv_item.source,
             source_id,
@@ -568,7 +513,7 @@ class TraktImporter:
             episode_number,
         )
         ep_key = f"{source_id}:{season_number}:{episode_number}"
-        self.queue_trakt_external_ids(episode.get("ids", {}), episode_item)
+        helpers.queue_external_ids(self.external_ids, episode.get("ids", {}), episode_item)
         episode_obj = app.models.Episode(
             item=episode_item,
             related_season=season_obj,
@@ -710,7 +655,7 @@ class TraktImporter:
             season_number=None,
     ):
         """Process media items for watchlist, ratings, and comments."""
-        metadata, source, source_id = self.get_metadata_by_priority(
+        metadata, source, source_id = helpers.get_metadata_by_priority(
             media_type,
             media_data.get("ids", {}),
             media_data.get("title"),
@@ -749,7 +694,7 @@ class TraktImporter:
         if media_type == MediaTypes.SEASON.value:
             key = f"{key}:{season_number}"
 
-        item = self._get_or_create_item(media_type, source.value, source_id, metadata, season_number)
+        item = helpers.get_or_create_item(media_type, source.value, source_id, metadata, season_number)
 
         if key in self.media_instances[media_type]:
             self._update_instance(media_type, key, defaults)
@@ -765,7 +710,7 @@ class TraktImporter:
 
     def _get_tv_obj(self, source_key, source_id, media_data, updated_at):
         """Get or create a TV object for the given season."""
-        tv_metadata = self._get_metadata(
+        tv_metadata = helpers.get_metadata(
             MediaTypes.TV.value,
             source_key,
             source_id,
@@ -774,7 +719,7 @@ class TraktImporter:
         if not tv_metadata:
             return None
 
-        tv_item = self._get_or_create_item(
+        tv_item = helpers.get_or_create_item(
             MediaTypes.TV.value,
             source_key,
             source_id,
@@ -827,57 +772,4 @@ class TraktImporter:
         except Exception as e:
             logger.exception(f"Failed to queue unresolved media {metadata_source}:{metadata_source_identifier} for user {getattr(self.user, 'username', '<unknown>')}: {e}")
 
-    def queue_trakt_external_ids(self, ids_dict, item):
-        """Queue ExternalID objects for bulk creation with error handling."""
-        valid_sources = {choice.value for choice in MetadataSources}
-
-        for source_key, source_id in ids_dict.items():
-            try:
-                if source_key not in valid_sources or not source_id:
-                    continue
-
-                # Convert source to enum safely
-                source_enum = MetadataSources(source_key)
-
-                self.external_ids.append(
-                    ExternalID(
-                        item=item,
-                        metadata_source=source_enum,
-                        metadata_source_identifier=str(source_id),
-                    )
-                )
-            except ValueError:
-                # Happens if source_key is not a valid Sources enum
-                logger.warning(
-                    "Skipping invalid external metadata source '%s' for item %s",
-                    source_key,
-                    getattr(item, "id", "<unknown>"),
-                )
-            except Exception as e:
-                logger.exception(
-                    "Failed to queue external ID %s:%s for item %s: %s",
-                    source_key,
-                    source_id,
-                    getattr(item, "id", "<unknown>"),
-                    e,
-                )
-
-    def get_metadata_by_priority(self, media_type, source_ids: dict, title, season_number=None, source_found=None):
-        """
-        Try metadata providers in priority order.
-        source_ids = {"tmdb": "123", "tvdb": "456"}
-        """
-
-        from app.config import get_property
-        for source in get_property(media_type, "sources"):
-            if source_found is not None and source_found != source.value:
-                continue
-            source_key = source.value
-            source_id = source_ids.get(source_key)
-            if not source_id:
-                continue
-
-            metadata = self._get_metadata(media_type, source_key, source_id, title, season_number)
-            return metadata, source, source_id
-
-        return None, None,None
+    
