@@ -1084,8 +1084,8 @@ class User(AbstractUser):
             "steam": "Import from Steam",
             "imdb": "Import from IMDB",
             "goodreads": "Import from GoodReads",
-            "plex": f"Import from Plex{' (Recurring)' if getattr(settings, 'PLEX_WATCH_SYNC', False) else ''}",
-            "pocketcasts": "Import from Pocket Casts (Recurring)",
+            "plex": "Import from Plex",
+            "pocketcasts": "Import from Pocket Casts",
             "lastfm": "Poll Last.fm for all users",
             "unresolved_import": "Process Unresolved Imports",
         }

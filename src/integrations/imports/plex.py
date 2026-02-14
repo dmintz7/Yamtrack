@@ -9,10 +9,13 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 from django.conf import settings
+from django.contrib.contenttypes.models import ContentType
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 import app
-from app.models import MediaTypes, Sources, Status, Item
+from app.models import MediaTypes, Sources, Status, Movie, Episode
 from app.providers import services
 from app.services.music import prefetch_album_covers
 
@@ -25,6 +28,8 @@ from integrations.imports.helpers import MediaImportError, MediaImportUnexpected
 from integrations.webhooks.plex import PlexWebhookProcessor
 
 from plexapi.server import PlexServer
+
+from integrations.models import PlexHistory
 
 logger = logging.getLogger(__name__)
 
@@ -888,7 +893,7 @@ class PlexHistoryImporter:
 
     def _import_ratings_from_library(self, section: dict, uri: str):
         """Fetch ratings from Plex library items and apply them to imported media instances.
-        
+
         This complements history import by fetching ratings from library items,
         which may have ratings even if they weren't in the watch history.
         """
@@ -947,7 +952,7 @@ class PlexHistoryImporter:
                         guids = [{"id": single_guid}]
 
                 external_ids = plex_api.extract_external_ids_from_guids(guids)
-                
+
                 # Normalize rating
                 title = item.get("title") or "Unknown"
                 normalized_rating = self._normalize_rating(user_rating, title)
@@ -1110,7 +1115,7 @@ class PlexHistoryImporter:
                 self.media_instances[MediaTypes.MOVIE.value][actual_tmdb_id] = [existing]
                 continue
 
-            item = self._get_or_create_item(
+            item = helpers.get_or_create_item(
                 MediaTypes.MOVIE.value,
                 actual_tmdb_id,
                 metadata,
@@ -1182,7 +1187,7 @@ class PlexHistoryImporter:
 
             actual_tmdb_id = str(tv_metadata.get("media_id", record["tmdb_id"]))
             tv_key = f"{actual_tmdb_id}"
-            
+
             if tv_key in self.media_instances[MediaTypes.TV.value]:
                 tv_obj = self.media_instances[MediaTypes.TV.value][tv_key][0]
             else:
@@ -1211,7 +1216,7 @@ class PlexHistoryImporter:
                         )
                     self.media_instances[MediaTypes.TV.value][tv_key] = [tv_obj]
                 else:
-                    tv_item = self._get_or_create_item(
+                    tv_item = helpers.get_or_create_item(
                         MediaTypes.TV.value,
                         actual_tmdb_id,
                         tv_metadata,
@@ -1237,7 +1242,7 @@ class PlexHistoryImporter:
             season_key = f"{actual_tmdb_id}:{record['season_number']}"
             if season_key not in self.media_instances[MediaTypes.SEASON.value]:
                 season_image = season_metadata.get("image") or tv_metadata.get("image")
-                season_item = self._get_or_create_item(
+                season_item = helpers.get_or_create_item(
                     MediaTypes.SEASON.value,
                     actual_tmdb_id,
                     {
@@ -1264,7 +1269,7 @@ class PlexHistoryImporter:
                 record["episode_number"],
                 season_metadata,
             )
-            episode_item = self._get_or_create_item(
+            episode_item = helpers.get_or_create_item(
                 MediaTypes.EPISODE.value,
                 record["tmdb_id"],
                 {
@@ -1445,7 +1450,7 @@ class PlexHistoryImporter:
                                 Sources.TMDB.value,
                                 season_numbers=sorted(season_numbers),
                             )
-                        
+
                         # If title has year in parenthesis like "Show (YYYY)", try stripping it
                         clean_title = re.sub(r'\s*\(\d{4}\)$', '', series_title)
                         if clean_title != series_title:
@@ -1681,10 +1686,11 @@ class PlexHistorySync:
     def __init__(self, user):
         self.user = user
         self.plex_account = getattr(user, "plex_account", None)
-        self.plex = PlexServer(settings.PLEX_HOST, self.plex_account.plex_token) if self.plex_account else None
+        self.plex = PlexServer(settings.PLEX_HOST, self.plex_account.plex_token, timeout=500) if self.plex_account else None
         self.warnings = []
         self.batch_to_create = []
         self.batch_to_update = []
+        self.external_ids = []
         self.existing_history = defaultdict(set)
 
     @staticmethod
@@ -1729,20 +1735,15 @@ class PlexHistorySync:
         return next((acct for acct in self.plex.systemAccounts() if acct.name == self.plex_account.plex_username), None, )
 
     def import_data(self, max_results):
-        from integrations.models import PlexHistory
         if not self.plex_account:
             logger.warning("Plex not connected for user %s, exiting task", self.user.username)
             return
 
-        logger.info(f"Starting Plex history sync for user {self.user.username} Max Results: { max_results if max_results else 'all'}")
-        self.plex = PlexServer(settings.PLEX_HOST, self.plex_account.plex_token)
-        plex_system_account = self.get_sys_account()
-        history_records = self.plex.history(accountID=plex_system_account.id, maxresults=max_results)
-        logger.info("Found %d history records", len(history_records))
-
-        # --- Fetch existing history keys in one query ---
-        history_keys = [self.parse_history_key(r) for r in history_records]
-        self.existing_history = {str(h.plex_history_id): h for h in PlexHistory.objects.filter(plex_history_id__in=history_keys)}
+        logger.info(f"Starting Plex History Sync, User {self.user.username}, Max Results: { max_results if max_results else 'all'}")
+        history_records = self.plex.history(accountID=self.get_sys_account().id, maxresults=max_results)
+        logger.info(f"Retrieved {len(history_records)} Plex History records, Finding Existing Records")
+        self.existing_history = {str(h.plex_history_id): h for h in PlexHistory.objects.all()}
+        logger.info(f"Found {len(self.existing_history)} existing Plex History records, processing records")
         for record in history_records:
             self._process_record(record)
 
@@ -1757,15 +1758,23 @@ class PlexHistorySync:
             logger.info("No Plex History records to update or create")
 
         result_counts = {}
-        for hist in self.batch_to_create + self.batch_to_update:
+        all_changed = self.batch_to_create + self.batch_to_update
+        for hist in all_changed:
             media_type = hist.item.media_type if hist.item else "unknown"
             result_counts[media_type] = result_counts.get(media_type, 0) + 1
+
+        if all_changed:
+            bulk_match_plex_history()
+        if self.external_ids:
+            helpers.bulk_create_external_ids(self.external_ids)
 
         deduped_warnings = "\n".join(dict.fromkeys(self.warnings))
         return result_counts, deduped_warnings
 
     def _process_record(self, record):
         try:
+            record.plex_obj = self.plex.fetchItem(record.ratingKey)
+            record.ids = self._get_ids_dict_from_guids(record.plex_obj)
             if record.type == "movie":
                 item = self._process_movie(record)
             elif record.type == "episode":
@@ -1783,98 +1792,129 @@ class PlexHistorySync:
 
     def _update_history(self, record, item):
         """Create or update PlexHistory entry"""
-        viewed_at = timezone.make_aware(record.viewedAt, timezone=timezone.get_current_timezone())
-        log_ctx = f"Rating Key: {record.ratingKey} | Type: {record.type} | Title: {self.create_plex_title(record)} | Viewed: {viewed_at}"
-        history_key = self.parse_history_key(record)
         from integrations.models import PlexHistory
+
+        viewed_at = timezone.make_aware(record.viewedAt, timezone=timezone.get_current_timezone())
+        history_key = self.parse_history_key(record)
         if history_key in self.existing_history:
-            hist = self.existing_history[history_key]
-            if any([
-                hist.item != item,
-                hist.plex_id != record.ratingKey,
-                hist.viewed_at != viewed_at,
-                hist.device_id != record.deviceID,
-            ]):
-                hist.item = item
-                hist.plex_id = record.ratingKey
-                hist.viewed_at = viewed_at
-                hist.device_id = record.deviceID
-                self.batch_to_update.append(hist)
+            history_obj = self.existing_history[history_key]
+            if any([history_obj.item != item, history_obj.plex_id != record.ratingKey, history_obj.viewed_at != viewed_at, history_obj.device_id != record.deviceID,]):
+                logger.info(f" Updating Plex history | History Key: {str(history_key):<8} | Rating Key: {str(record.ratingKey):<8} | Type: {record.type:<8} | Title: {self.create_plex_title(record)[:70]:<70} | Viewed: {viewed_at.isoformat(sep=' '):<25}")
+                history_obj.item = item
+                history_obj.plex_id = record.ratingKey
+                history_obj.viewed_at = viewed_at
+                history_obj.device_id = record.deviceID
+                self.batch_to_update.append(history_obj)
         else:
-            # create new
-            self.batch_to_create.append(
-                PlexHistory(
-                    user=self.user,
-                    plex_history_id=history_key,
-                    item=item,
-                    plex_id=record.ratingKey,
-                    viewed_at=viewed_at,
-                    device_id=record.deviceID,
-                )
-            )
-        # logger.info("Processed Plex history | %s", log_ctx)
+            logger.info(f"Processed Plex history | History Key: {str(history_key):<8} | Rating Key: {str(record.ratingKey):<8} | Type: {record.type:<8} | Title: {self.create_plex_title(record)[:70]:<70} | Viewed: {viewed_at.isoformat(sep=' '):<25}")
+            history_obj = PlexHistory(user=self.user, plex_history_id=history_key, item=item, plex_id=record.ratingKey, viewed_at=viewed_at, device_id=record.deviceID,)
+            self.batch_to_create.append(history_obj)
 
     def _process_movie(self, record):
-        """Process a single movie record with dynamic source priority"""
-        plex_item = self.plex.fetchItem(record.ratingKey)
-        for source in self.source_priority(plex_item.type):
-            source_id = self._extract_source_id(plex_item, source)
-            if not source_id:
-                continue
+        """
+        Process a single movie record in a Trakt-like way.
+        Resolves metadata, validates existence, queues external IDs, updates bulk structures.
+        """
 
-            item, created = Item.objects.get_or_create(
-                media_id=source_id,
-                source=source.value,
-                media_type=MediaTypes.MOVIE.value,
-                defaults={"title": record.title, "image": record.thumb},
-            )
-            return item
-        self.warnings.append(f"Movie {record.title} could not be matched to any source")
-        return None
+        # --- Resolve Movie Metadata by priority ---
+        metadata, source, source_id = helpers.get_metadata_by_priority(
+            MediaTypes.MOVIE.value,
+            record.ids,
+            record.plex_obj.title,
+        )
 
-    def _process_episode(self, record):
-        """Process a single episode record (show -> season -> episode)"""
-        show = record.show()
-        show_item = None
-
-        # --- TV Show ---
-        for source in self.source_priority(record.type):
-            show_id = self._extract_source_id(show, source)
-            if show_id:
-                show_item, _ = Item.objects.get_or_create(
-                    media_id=show_id,
-                    source=source.value,
-                    media_type=MediaTypes.TV.value,
-                    defaults={"title": show.title, "image": show.thumb},
-                )
-                break
-        if not show_item:
-            self.warnings.append(f"Show {show.title} could not be matched to any source")
+        if not metadata:
+            self.warnings.append(f"Movie {record.plex_obj.title} could not be resolved via metadata providers")
             return None
 
-        season_number = record.seasonNumber
-        episode_number = record.episodeNumber or record.index
 
-        # --- Season ---
-        Item.objects.get_or_create(
-            media_id=show_item.media_id,
-            source=show_item.source,
-            media_type=MediaTypes.SEASON.value,
-            season_number=season_number,
-            defaults={"title": show.title, "image": show.thumb},
-        )
-
-        # --- Episode ---
-        item, _ = Item.objects.get_or_create(
-            media_id=show_item.media_id,
-            source=show_item.source,
-            media_type=MediaTypes.EPISODE.value,
-            season_number=season_number,
-            episode_number=episode_number,
-            defaults={"title": show.title, "image": record.thumb},
-        )
+        item = helpers.get_or_create_item(MediaTypes.MOVIE.value, source.value, source_id, metadata)
+        helpers.queue_external_ids(self.external_ids, record.ids, item)
 
         return item
+
+    def _process_episode(self, record):
+        """
+        Process a single episode record (show -> season -> episode) in a Trakt-like way.
+        Resolves metadata, validates existence, queues external IDs, updates bulk structures.
+        """
+        try:
+            show = record.show()
+            episode_number = record.episodeNumber or record.index
+            season_number = record.seasonNumber or record.parentIndex
+
+            if not show:
+                self.warnings.append(f"Episode {record.title} has no associated show")
+                return None
+
+            # --- Resolve Show Metadata by priority ---
+            record.show_ids = self._get_ids_dict_from_guids(show)
+            show_metadata, source, show_source_id = helpers.get_metadata_by_priority(
+                MediaTypes.TV.value,
+                record.show_ids,
+                show.title,
+            )
+            if not show_metadata:
+                self.warnings.append(f"Show {show.title} could not be resolved via metadata providers")
+                return None
+
+            # --- Check or create TV show item ---
+            tv_item = helpers.get_or_create_item(MediaTypes.TV.value, source.value, show_source_id, show_metadata)
+
+            season_metadata, season_source, season_source_id = helpers.get_metadata_by_priority(
+                MediaTypes.SEASON.value,
+                record.show_ids,
+                show.title,
+                season_number=season_number,
+                source_found=source.value,
+            )
+
+            if not season_metadata:
+                if not (found_info := helpers.TMDBResolver(history_record=record).resolve()):
+                    logger.warning(f"{show.title} S{season_number}: not found in {source.label} with ID {show_source_id}.")
+                    return
+
+                season_number = found_info["season_number"]
+                episode_number = found_info["episode_number"]
+                season_metadata, season_source, season_source_id = helpers.get_metadata_by_priority(
+                    MediaTypes.SEASON.value,
+                    record.show_ids,
+                    record.plex_obj.grandparentTitle,
+                    season_number=season_number,
+                )
+
+            if not season_metadata:
+                self.warnings.append(f"Season {season_number} of {show.title} could not be resolved")
+                return None
+
+            # --- Validate Episode existence ---
+            episode_exists = any(
+                ep["episode_number"] == episode_number for ep in season_metadata.get("episodes", [])
+            )
+            if not episode_exists:
+                self.warnings.append(f"Episode S{season_number}E{episode_number} of {show.title} not found")
+                return None
+
+            # --- Get episode image ---
+            episode_image = self._get_episode_image(episode_number, season_metadata)
+            episode_metadata = {"title": show_metadata.get("title", show.title), "image": episode_image}
+
+            # --- Check or create Episode item ---
+            episode_item = helpers.get_or_create_item(
+                MediaTypes.EPISODE.value,
+                tv_item.source,
+                show_source_id,
+                episode_metadata,
+                season_number,
+                episode_number,
+            )
+            helpers.queue_external_ids(self.external_ids, self._get_ids_dict_from_guids(record), episode_item)
+
+            return episode_item
+        except Exception as e:
+            import sys
+            tb_line = sys.exc_info()[-1].tb_lineno
+            logger.error("Error on line %d - %s - %s", tb_line, type(e).__name__, e)
 
     @staticmethod
     def _extract_source_id(plex_item, source_enum):
@@ -1890,3 +1930,126 @@ class PlexHistorySync:
     @staticmethod
     def parse_history_key(record):
         return str(record.historyKey).rsplit("/", 1)[-1]
+
+    @staticmethod
+    def _get_ids_dict_from_guids(plex_item):
+        ids = {}
+        for guid in plex_item.guids:
+            try:
+                parts = guid.id.split("://", 1)
+                if len(parts) == 2:
+                    ids[parts[0]] = parts[1]
+            except Exception:
+                continue
+        return ids
+
+    def _get_episode_image(self, episode_number, season_metadata):
+        """Extract episode image URL from season metadata."""
+        # for episode in season_metadata["episodes"]:
+        #     if episode["episode_number"] == episode_number:
+        #         if episode.get("image"):
+        #             return episode["image"]
+        #         elif episode.get("still_path"):
+        #             return f"https://image.tmdb.org/t/p/w500{episode['still_path']}"
+        #         break
+        return settings.IMG_NONE
+
+
+def bulk_match_plex_history(batch_size=2000):
+    """
+    High-performance matcher for PlexHistory → Movie/Episode.
+    Includes verbose logging for debugging and analysis.
+    """
+
+    logger.info("=== Starting bulk PlexHistory match ===")
+
+    # ---- Preload ContentTypes ----
+    movie_ct = ContentType.objects.get_for_model(Movie)
+    episode_ct = ContentType.objects.get_for_model(Episode)
+    logger.info(f"Preloaded ContentTypes: Movie={movie_ct}, Episode={episode_ct}")
+
+    # Track both type and ID
+    already_matched = set(
+        PlexHistory.objects.exclude(matched_media_id__isnull=True)
+        .values_list("matched_media_type", "matched_media_id")
+    )
+    logger.info(f"Loaded {len(already_matched)} already matched (type, id) pairs")
+
+    unmatched_qs = (
+        PlexHistory.objects.filter(matched_media_id__isnull=True, item__isnull=False)
+        .select_related("user", "item")
+        .order_by("viewed_at")
+    )
+    total_unmatched = unmatched_qs.count()
+    logger.info(f"Found {total_unmatched} unmatched PlexHistory rows")
+
+    updates = []
+    processed_total = 0
+
+    for ph in unmatched_qs.iterator(chunk_size=batch_size):
+        try:
+            logger.debug(f"Processing PlexHistory id={ph.id}, user_id={ph.user_id}, item_id={ph.item_id}, media_type={ph.item.media_type}")
+
+            if ph.item.media_type == MediaTypes.MOVIE.value:
+                item_model = Movie
+                user_filter = Q(user=ph.user)
+                ct = movie_ct
+                logger.debug(f"PlexHistory id={ph.id} is a MOVIE")
+            elif ph.item.media_type == MediaTypes.EPISODE.value:
+                item_model = Episode
+                user_filter = Q(related_season__related_tv__user=ph.user)
+                ct = episode_ct
+                logger.debug(f"PlexHistory id={ph.id} is an EPISODE")
+            else:
+                logger.warning(f"Skipping PlexHistory id={ph.id}, unknown media_type={ph.item.media_type}")
+                continue
+
+            candidates = (
+                item_model.objects.filter(user_filter, end_date__isnull=False, item=ph.item)
+                .only("id", "end_date")
+            )
+            logger.debug(f"Found {candidates.count()} candidate(s) for PlexHistory id={ph.id}")
+
+            best = None
+            best_delta = None
+
+            for c in candidates:
+                # Skip if already matched with this type
+                if (ct.id, c.id) in already_matched:
+                    logger.debug(f"Skipping candidate id={c.id}, already matched with type {ct}")
+                    continue
+
+                delta = abs((ph.viewed_at - c.end_date).total_seconds())
+                logger.debug(f"Candidate id={c.id}, end_date={c.end_date}, delta={delta} seconds")
+
+                if best is None or delta < best_delta:
+                    best = c
+                    best_delta = delta
+                    logger.debug(f"New best candidate id={best.id} with delta={best_delta}")
+
+            if best:
+                ph.matched_media_id = best.id
+                ph.matched_media_type = ct
+                updates.append(ph)
+                already_matched.add((ct.id, best.id))
+                logger.info(f"Matched PlexHistory id={ph.id} to media id={best.id}, delta={best_delta} seconds")
+
+                processed_total += 1
+
+                if len(updates) >= batch_size:
+                    with transaction.atomic():
+                        PlexHistory.objects.bulk_update(updates, ["matched_media_id", "matched_media_type"])
+                    logger.info(f"Flushed {len(updates)} updates to DB, total processed so far={processed_total}")
+                    updates.clear()
+            else:
+                logger.warning(f"No match found for PlexHistory id={ph.id}")
+
+        except Exception as e:
+            logger.exception(f"Failed matching PlexHistory id={ph.id}, error={e}")
+
+    if updates:
+        with transaction.atomic():
+            PlexHistory.objects.bulk_update(updates, ["matched_media_id", "matched_media_type"])
+        logger.info(f"Final flush of {len(updates)} updates, total processed={processed_total}")
+
+    logger.info("=== Bulk match finished ===")

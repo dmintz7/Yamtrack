@@ -109,6 +109,16 @@
                 <div class="space-y-3">
                     <form method="post" action="{% url 'import_plex_sync' %}">
                         {% csrf_token %}
+                        <div class="mb-3">
+                          <label class="block text-sm text-gray-300 mb-2">Mode</label>
+                          <div class="relative">
+                            <select name="mode" class="w-full py-2 px-3 bg-[#2a2f35] rounded-md text-white text-sm border border-gray-600 focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 appearance-none">
+                              <option value="all">All</option>
+                              <option value="new">Recent</option>
+                            </select>
+                            {% include "app/icons/chevron-down.svg" with classes="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" %}
+                          </div>
+                        </div>
                         <button type="submit"
                                 class="w-full px-4 py-2 text-sm rounded-md transition-colors cursor-pointer bg-indigo-600 text-white hover:bg-indigo-700">
                             Sync now

@@ -26,8 +26,7 @@ class Migration(migrations.Migration):
                 ('user', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='plex_history', to=settings.AUTH_USER_MODEL)),
             ],
             options={
-                'ordering': ['-viewed_at'],
-                'constraints': [models.UniqueConstraint(fields=('user', 'item', 'viewed_at'), name='unique_user_item_viewed_at')],
+                'ordering': ['-viewed_at']
             },
         ),
     ]

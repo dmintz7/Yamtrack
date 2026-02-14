@@ -236,12 +236,10 @@ def plex_callback(request):
                     name=task_name,
                     task="Import from Plex (Recurring)",
                     crontab=crontab,
-                    kwargs=json.dumps({"user_id": request.user.id, "mode": "new"}),
+                    kwargs=json.dumps({"user_id": request.user.id}),
                     start_time=timezone.now(),
                     enabled=True,
                 )
-
-            tasks.import_plex_history.delay(user_id=request.user.id, mode="all")
 
             messages.success(request, "Connected to Plex successfully. Initial import queued. Recurring imports will run every 2 hours.")
         except Exception as e:
@@ -1185,13 +1183,9 @@ def import_plex_sync(request):
     ).first()
 
     # Always use mode="new" for Plex watch-sync
-    # mode = "new"
-
+    mode = request.POST.get("mode", "new")
+    tasks.import_plex.delay(None, user_id=request.user.id, mode=mode)
     if not existing_task:
-        # First import - run immediately, then set up 2-hour schedule
-        tasks.import_plex.delay(user_id=request.user.id,)
-        messages.info(request, "The task to import media from Plex has been queued. Recurring imports will run every 2 hours.")
-
         # Set up 2-hour recurring schedule
         crontab, _ = CrontabSchedule.objects.get_or_create(
             minute=0,
@@ -1213,12 +1207,7 @@ def import_plex_sync(request):
             start_time=timezone.now(),
             enabled=True,
         )
+        messages.info(request, "The task to import media from Plex has been queued. Recurring imports will run every 2 hours.")
     else:
-        # Just run a manual import
-        tasks.import_plex_history.delay(
-            user_id=request.user.id,
-            mode="all"
-        )
         messages.info(request, "The task to import media from Plex has been queued.")
-
     return redirect("import_data")

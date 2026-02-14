@@ -2,6 +2,7 @@ import logging
 import time
 
 from celery import shared_task
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
@@ -223,7 +224,17 @@ def import_hardcover(file, user_id, mode):
 @shared_task(name="Import from Plex")
 def import_plex(library, user_id, mode, username=None):  # noqa: ARG001
     """Celery task for importing media data from Plex."""
-    return import_media(plex.importer, library, user_id, mode)
+    if settings.PLEX_WATCH_SYNC:
+        import_func = plex.watch_sync
+    else:
+        import_func = plex.importer
+    return import_media(import_func, library, user_id, mode)
+
+
+@shared_task(name="Import from Plex (Recurring)")
+def import_plex_history_recurring(user_id):
+    """Task to display in recurring section"""
+    return import_plex(None, user_id, mode="new")
 
 
 @shared_task(name="Import from Pocket Casts")
@@ -237,11 +248,6 @@ def import_pocketcasts_history(user_id):
     """Recurring import task for Pocket Casts (called every 2 hours via Celery beat)."""
     return import_pocketcasts.delay(user_id, mode="new")
 
-
-@shared_task(name="Import from Plex (Recurring)")
-def import_plex_history(user_id, mode):
-    """Recurring import task for Pocket Casts (called every 2 hours via Celery beat)."""
-    return import_media(plex.watch_sync, None, user_id, mode)
 
 @shared_task(name="Poll Last.fm for all users")
 def poll_all_lastfm_scrobbles():
