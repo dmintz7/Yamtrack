@@ -1,6 +1,7 @@
 import secrets
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.utils import timezone
@@ -1079,14 +1080,15 @@ class User(AbstractUser):
             "anilist": "Import from AniList",
             "kitsu": "Import from Kitsu",
             "yamtrack": "Import from Yamtrack",
-        "hltb": "Import from HowLongToBeat",
-        "steam": "Import from Steam",
-        "imdb": "Import from IMDB",
-        "goodreads": "Import from GoodReads",
-        "plex": "Import from Plex",
-        "pocketcasts": "Import from Pocket Casts (Recurring)",
-        "lastfm": "Poll Last.fm for all users",
-    }
+            "hltb": "Import from HowLongToBeat",
+            "steam": "Import from Steam",
+            "imdb": "Import from IMDB",
+            "goodreads": "Import from GoodReads",
+            "plex": f"Import from Plex{' (Recurring)' if getattr(settings, 'PLEX_WATCH_SYNC', False) else ''}",
+            "pocketcasts": "Import from Pocket Casts (Recurring)",
+            "lastfm": "Poll Last.fm for all users",
+            "unresolved_import": "Process Unresolved Imports",
+        }
 
         # Reverse mapping to get source from task name
         task_to_source = {v: k for k, v in import_tasks.items()}

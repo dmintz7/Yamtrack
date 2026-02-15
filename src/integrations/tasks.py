@@ -238,6 +238,11 @@ def import_pocketcasts_history(user_id):
     return import_pocketcasts.delay(user_id, mode="new")
 
 
+@shared_task(name="Import from Plex (Recurring)")
+def import_plex_history(user_id, mode):
+    """Recurring import task for Pocket Casts (called every 2 hours via Celery beat)."""
+    return import_media(plex.watch_sync, None, user_id, mode)
+
 @shared_task(name="Poll Last.fm for all users")
 def poll_all_lastfm_scrobbles():
     """Global task to poll Last.fm for all connected users.
@@ -2052,3 +2057,26 @@ def update_collection_metadata_from_plex(library, user_id):
         "errors": error_count,
         "message": f"Updated collection metadata for {updated_count} items",
     }
+
+
+@shared_task(name="Process Unresolved Imports")
+def process_unresolved_imports(user_id, username=None):
+    from integrations.imports.helpers import initiate_unresolved_import
+
+    """
+    Celery task to reprocess unresolved media for a user.
+    """
+    User = get_user_model()
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        logger.warning("process_unresolved_imports task: user %s does not exist", user_id)
+        return {"success": 0, "failed": 0}
+
+    # Call the helper function"
+    logger.info("Starting unresolved media reprocessing for user %s", user.username)
+    result, warnings = initiate_unresolved_import(user)
+
+    logger.info(f"Successfully reprocessed {len(result)} records for user %s: success=%s")
+
+    return format_import_message(result, warnings)

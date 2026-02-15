@@ -77,26 +77,30 @@ class Migration(migrations.Migration):
             model_name='user',
             name='last_search_type_valid',
         ),
-        AddFieldIfNotExists(
+        migrations.RemoveConstraint(
             model_name='user',
-            name='boardgame_enabled',
-            field=models.BooleanField(default=True),
+            name='home_sort_valid',
         ),
-        AddFieldIfNotExists(
-            model_name='user',
-            name='boardgame_layout',
-            field=models.CharField(choices=[('grid', 'Grid'), ('table', 'Table')], default='grid', max_length=20),
-        ),
-        AddFieldIfNotExists(
-            model_name='user',
-            name='boardgame_sort',
-            field=models.CharField(choices=[('score', 'Rating'), ('title', 'Title'), ('progress', 'Progress'), ('start_date', 'Start Date'), ('end_date', 'End Date')], default='score', max_length=20),
-        ),
-        AddFieldIfNotExists(
-            model_name='user',
-            name='boardgame_status',
-            field=models.CharField(choices=[('All', 'All'), ('Completed', 'Completed'), ('In progress', 'In Progress'), ('Planning', 'Planning'), ('Paused', 'Paused'), ('Dropped', 'Dropped')], default='All', max_length=20),
-        ),
+        # migrations.AddField(
+        #     model_name='user',
+        #     name='boardgame_enabled',
+        #     field=models.BooleanField(default=True),
+        # ),
+        # migrations.AddField(
+        #     model_name='user',
+        #     name='boardgame_layout',
+        #     field=models.CharField(choices=[('grid', 'Grid'), ('table', 'Table')], default='grid', max_length=20),
+        # ),
+        # migrations.AddField(
+        #     model_name='user',
+        #     name='boardgame_sort',
+        #     field=models.CharField(choices=[('score', 'Rating'), ('title', 'Title'), ('progress', 'Progress'), ('start_date', 'Start Date'), ('end_date', 'End Date')], default='score', max_length=20),
+        # ),
+        # migrations.AddField(
+        #     model_name='user',
+        #     name='boardgame_status',
+        #     field=models.CharField(choices=[('All', 'All'), ('Completed', 'Completed'), ('In progress', 'In Progress'), ('Planning', 'Planning'), ('Paused', 'Paused'), ('Dropped', 'Dropped')], default='All', max_length=20),
+        # ),
         migrations.AlterField(
             model_name='user',
             name='home_sort',
