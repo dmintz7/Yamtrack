@@ -23,7 +23,7 @@ jobs:
       - name: Reset pristine to upstream release
         run: |
           git checkout pristine || git checkout -b pristine
-          git reset --hard upstream/release
+          git reset --hard upstream/latest
           git clean -fd
 
       - name: Force push pristine
