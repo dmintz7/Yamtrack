@@ -388,7 +388,7 @@ class TMDBResolver:
         episode_airdate = None
         if self.tvdb_episode_id:
             episode_airdate = self._fetch_tvdb_airdate()
-        if self.trakt_episode_id:
+        if self.trakt_episode_id and not episode_airdate:
             episode_airdate = self._fetch_trakt_airdate()
 
         if self.history:
@@ -483,7 +483,7 @@ class TMDBResolver:
             if not first_air:
                 continue
 
-            first_air_date = parse_date(first_air)
+            first_air_date = parse_date(first_air) if isinstance(first_air, str) else first_air
             if not first_air_date:
                 continue
 

@@ -241,6 +241,25 @@ def plex_callback(request):
                     enabled=True,
                 )
 
+                crontab, _ = CrontabSchedule.objects.get_or_create(
+                    minute="*/2",
+                    hour="*",
+                    day_of_week="*",
+                    day_of_month="*",
+                    month_of_year="*",
+                    timezone=timezone.get_default_timezone(),
+                )
+
+                task_name = f"Scrobble Plex streams for {request.user.username} (every 2 minutes)"
+                PeriodicTask.objects.create(
+                    name=task_name,
+                    task="Scrobble Plex sessions (Recurring)",
+                    crontab=crontab,
+                    kwargs=json.dumps({"user_id": request.user.id}),
+                    start_time=timezone.now(),
+                    enabled=True,
+                )
+
             messages.success(request, "Connected to Plex successfully. Initial import queued. Recurring imports will run every 2 hours.")
         except Exception as e:
             messages.error(request, f"Failed to connect Plex: {e}")

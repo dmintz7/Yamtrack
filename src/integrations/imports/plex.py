@@ -2,6 +2,8 @@
 
 import logging
 import re
+import sys
+
 import urllib3
 
 from collections import defaultdict
@@ -1662,6 +1664,9 @@ class PlexHistoryImporter:
             except Exception as exc:  # pragma: no cover - defensive network guard
                 logger.debug("Cover prefetch failed for artist %s: %s", artist_id, exc)
 
+def session_watch_sync(user):
+    watcher = PlexSessionWatcher(user=user)
+    return watcher.sync()
 
 def watch_sync(library, user, mode):
     """Import Plex watch/listen history for the user."""
@@ -1669,29 +1674,24 @@ def watch_sync(library, user, mode):
     if not account or not account.plex_token:
         raise MediaImportError("Plex is not connected for this user.")
 
-    plex_importer = PlexHistorySync(
+    importer = PlexHistorySync(
         user=user,
     )
 
     max_results = 100 if isinstance(mode, str) and mode == "new" else None
-    return plex_importer.import_data(max_results)
+    return importer.import_data(max_results)
 
 
-class PlexHistorySync:
-    """
-    Sync Plex watch history for a user.
-    Handles movies, shows, seasons, episodes with dynamic source priority.
-    """
-
+class PlexBase:
     def __init__(self, user):
         self.user = user
         self.plex_account = getattr(user, "plex_account", None)
         self.plex = PlexServer(settings.PLEX_HOST, self.plex_account.plex_token, timeout=500) if self.plex_account else None
-        self.warnings = []
-        self.batch_to_create = []
-        self.batch_to_update = []
         self.external_ids = []
-        self.existing_history = defaultdict(set)
+        self.warnings = []
+
+    def get_sys_account(self):
+        return next((acct for acct in self.plex.systemAccounts() if acct.name == self.plex_account.plex_username), None, )
 
     @staticmethod
     def source_priority(media_type):
@@ -1731,12 +1731,137 @@ class PlexHistorySync:
             logger.error('Error on line {} - {} - {}'.format(type(e).__name__, sys.exc_info()[-1].tb_lineno, e))
         return unidecode(title)
 
-    def get_sys_account(self):
-        return next((acct for acct in self.plex.systemAccounts() if acct.name == self.plex_account.plex_username), None, )
+    def _process_movie(self, record):
+        metadata, source, source_id = helpers.get_metadata_by_priority(MediaTypes.MOVIE.value, record.ids, record.plex_obj.title,)
+
+        if not metadata:
+            self.warnings.append(
+                f"Movie {record.plex_obj.title} could not be resolved via metadata providers"
+            )
+            return None
+
+        item = helpers.get_or_create_item(
+            MediaTypes.MOVIE.value,
+            source.value,
+            source_id,
+            metadata,
+        )
+
+        helpers.queue_external_ids(self.external_ids, record.ids, item)
+        return item
+
+    def _process_episode(self, record):
+        try:
+            show = record.show()
+            if not show:
+                self.warnings.append(f"Episode {record.title} has no associated show")
+                return None
+
+            episode_number = record.episodeNumber or record.index
+            season_number = record.seasonNumber or record.parentIndex
+
+            record.show_ids = self._get_ids_dict_from_guids(show)
+
+            show_metadata, source, show_source_id = helpers.get_metadata_by_priority(
+                MediaTypes.TV.value,
+                record.show_ids,
+                show.title,
+            )
+
+            if not show_metadata:
+                self.warnings.append(
+                    f"Show {show.title} could not be resolved via metadata providers"
+                )
+                return None
+
+            tv_item = helpers.get_or_create_item(
+                MediaTypes.TV.value,
+                source.value,
+                show_source_id,
+                show_metadata,
+            )
+
+            season_metadata, _, _ = helpers.get_metadata_by_priority(
+                MediaTypes.SEASON.value,
+                record.show_ids,
+                show.title,
+                season_number=season_number,
+                source_found=source.value,
+            )
+
+            if not season_metadata:
+                found = helpers.TMDBResolver(history_record=record).resolve()
+                if not found:
+                    logger.warning(
+                        f"{show.title} S{season_number}: not found in {source.label}"
+                    )
+                    return None
+
+                season_number = found["season_number"]
+                episode_number = found["episode_number"]
+
+                season_metadata, _, _ = helpers.get_metadata_by_priority(
+                    MediaTypes.SEASON.value,
+                    record.show_ids,
+                    record.plex_obj.grandparentTitle,
+                    season_number=season_number,
+                )
+
+            if not season_metadata:
+                self.warnings.append(
+                    f"Season {season_number} of {show.title} could not be resolved"
+                )
+                return None
+
+            if not any(
+                ep["episode_number"] == episode_number
+                for ep in season_metadata.get("episodes", [])
+            ):
+                self.warnings.append(
+                    f"Episode S{season_number}E{episode_number} of {show.title} not found"
+                )
+                return None
+
+            episode_item = helpers.get_or_create_item(
+                MediaTypes.EPISODE.value,
+                tv_item.source,
+                show_source_id,
+                {
+                    "title": show_metadata.get("title", show.title),
+                    "image": settings.IMG_NONE,
+                },
+                season_number,
+                episode_number,
+            )
+
+            helpers.queue_external_ids(
+                self.external_ids,
+                self._get_ids_dict_from_guids(record),
+                episode_item,
+            )
+
+            return episode_item
+
+        except Exception:
+            logger.exception("Episode processing failed")
+            return None
+
+class PlexHistorySync(PlexBase):
+
+    def __init__(self, user):
+        super().__init__(user)
+        self.batch_to_create = []
+        self.batch_to_update = []
+        self.existing_history = {}
+
+    @staticmethod
+    def parse_history_key(record):
+        return str(record.historyKey).rsplit("/", 1)[-1]
+
 
     def import_data(self, max_results):
-        if not self.plex_account:
-            logger.warning("Plex not connected for user %s, exiting task", self.user.username)
+        if not self.plex:
+            logger.warning("Plex not connected for user %s", self.user.username)
             return
 
         logger.info(f"Starting Plex History Sync, User {self.user.username}, Max Results: { max_results if max_results else 'all'}")
@@ -1757,19 +1882,21 @@ class PlexHistorySync:
         if not self.batch_to_create and not self.batch_to_update:
             logger.info("No Plex History records to update or create")
 
-        result_counts = {}
-        all_changed = self.batch_to_create + self.batch_to_update
-        for hist in all_changed:
-            media_type = hist.item.media_type if hist.item else "unknown"
-            result_counts[media_type] = result_counts.get(media_type, 0) + 1
+        bulk_match_plex_history()
 
-        if all_changed:
-            bulk_match_plex_history()
         if self.external_ids:
             helpers.bulk_create_external_ids(self.external_ids)
 
-        deduped_warnings = "\n".join(dict.fromkeys(self.warnings))
-        return result_counts, deduped_warnings
+        return self._build_results()
+
+    def _build_results(self):
+        counts = {}
+        for h in self.batch_to_create + self.batch_to_update:
+            mt = getattr(h.item, "media_type", "unknown")
+            counts[mt] = counts.get(mt, 0) + 1
+
+        warnings = "\n".join(dict.fromkeys(self.warnings))
+        return counts, warnings
 
     def _process_record(self, record):
         try:
@@ -1780,169 +1907,264 @@ class PlexHistorySync:
             elif record.type == "episode":
                 item = self._process_episode(record)
             else:
-                logger.debug("Unsupported media type: %s", record.type)
                 return
 
             self._update_history(record, item)
-
         except Exception as e:
-            import sys
-            tb_line = sys.exc_info()[-1].tb_lineno
-            logger.error("Error on line %d - %s - %s", tb_line, type(e).__name__, e)
+            logger.exception(f"History record processing failed on line {type(e.__name__)} - {sys.exc_info()[-1].tb_lineno} - {e}")
 
     def _update_history(self, record, item):
-        """Create or update PlexHistory entry"""
-        from integrations.models import PlexHistory
+        viewed_at = timezone.make_aware(record.viewedAt, timezone=timezone.get_current_timezone(),)
 
-        viewed_at = timezone.make_aware(record.viewedAt, timezone=timezone.get_current_timezone())
         history_key = self.parse_history_key(record)
-        if history_key in self.existing_history:
-            history_obj = self.existing_history[history_key]
-            if any([history_obj.item != item, history_obj.plex_id != record.ratingKey, history_obj.viewed_at != viewed_at, history_obj.device_id != record.deviceID,]):
+        existing = self.existing_history.get(history_key)
+
+        if existing:
+            if any([existing.item != item, existing.plex_id != record.ratingKey, existing.viewed_at != viewed_at, existing.device_id != record.deviceID,]):
                 logger.info(f" Updating Plex history | History Key: {str(history_key):<8} | Rating Key: {str(record.ratingKey):<8} | Type: {record.type:<8} | Title: {self.create_plex_title(record)[:70]:<70} | Viewed: {viewed_at.isoformat(sep=' '):<25}")
-                history_obj.item = item
-                history_obj.plex_id = record.ratingKey
-                history_obj.viewed_at = viewed_at
-                history_obj.device_id = record.deviceID
-                self.batch_to_update.append(history_obj)
+                existing.item = item
+                existing.plex_id = record.ratingKey
+                existing.viewed_at = viewed_at
+                existing.device_id = record.deviceID
+                self.batch_to_update.append(existing)
         else:
-            logger.info(f"Processed Plex history | History Key: {str(history_key):<8} | Rating Key: {str(record.ratingKey):<8} | Type: {record.type:<8} | Title: {self.create_plex_title(record)[:70]:<70} | Viewed: {viewed_at.isoformat(sep=' '):<25}")
-            history_obj = PlexHistory(user=self.user, plex_history_id=history_key, item=item, plex_id=record.ratingKey, viewed_at=viewed_at, device_id=record.deviceID,)
-            self.batch_to_create.append(history_obj)
+            self.batch_to_create.append(
+                PlexHistory(
+                    user=self.user,
+                    plex_history_id=history_key,
+                    item=item,
+                    plex_id=record.ratingKey,
+                    viewed_at=viewed_at,
+                    device_id=record.deviceID,
+                )
+            )
 
-    def _process_movie(self, record):
-        """
-        Process a single movie record in a Trakt-like way.
-        Resolves metadata, validates existence, queues external IDs, updates bulk structures.
-        """
+class PlexSessionWatcher(PlexBase):
 
-        # --- Resolve Movie Metadata by priority ---
-        metadata, source, source_id = helpers.get_metadata_by_priority(
-            MediaTypes.MOVIE.value,
-            record.ids,
-            record.plex_obj.title,
-        )
+    def __init__(self, user):
+        super().__init__(user)
+        self.threshold = int(getattr(settings, "MARK_WATCHED_PERCENT", 90))
 
-        if not metadata:
-            self.warnings.append(f"Movie {record.plex_obj.title} could not be resolved via metadata providers")
-            return None
+    def sync(self):
+        if not self.plex:
+            logger.warning(f"Plex not connected for {self.user.username}")
+            return
 
-
-        item = helpers.get_or_create_item(MediaTypes.MOVIE.value, source.value, source_id, metadata)
-        helpers.queue_external_ids(self.external_ids, record.ids, item)
-
-        return item
-
-    def _process_episode(self, record):
-        """
-        Process a single episode record (show -> season -> episode) in a Trakt-like way.
-        Resolves metadata, validates existence, queues external IDs, updates bulk structures.
-        """
         try:
-            show = record.show()
-            episode_number = record.episodeNumber or record.index
-            season_number = record.seasonNumber or record.parentIndex
+            sessions = self.plex.sessions()
+        except Exception:
+            logger.exception("Failed retrieving sessions")
+            return
 
-            if not show:
-                self.warnings.append(f"Episode {record.title} has no associated show")
+        for s in sessions:
+            try:
+                self._handle_session(s)
+            except Exception:
+                logger.exception("Session processing failed")
+
+        if self.external_ids:
+            helpers.bulk_create_external_ids(self.external_ids)
+
+    def _handle_session(self, s):
+        if s.usernames[0] != self.plex_account.plex_username:
+            return
+
+        if not s.duration:
+            logger.warning("Session missing duration")
+            return
+
+        progress = min((s.viewOffset / s.duration) * 100, 100)
+        state = s.players[0].state
+
+        logger.info(f"Scrobbling {self.create_plex_title(s)}. {progress:.2f}% watched, currently {state}.")
+        if progress < self.threshold:
+            return
+
+        item = self._process_record(s)
+        if not item:
+            logger.debug(f"Session item not found locally ratingKey={s.ratingKey}")
+
+    def _process_record(self, record):
+        """
+        Process a single Plex session record immediately.
+        If a matching entry exists in the last hour, update end_date.
+        Otherwise create a new entry.
+        """
+
+        record.plex_obj = self.plex.fetchItem(record.ratingKey)
+        record.ids = self._get_ids_dict_from_guids(record.plex_obj)
+
+        # --- watched_at normalize ---
+        watched_at = getattr(record, "viewedAt", timezone.now())
+        if timezone.is_naive(watched_at):
+            watched_at = timezone.make_aware(watched_at, timezone.get_current_timezone())
+
+        one_hour_ago = timezone.now() - timezone.timedelta(hours=1)
+        if record.type == "movie":
+            metadata, source, source_id = helpers.get_metadata_by_priority(
+                MediaTypes.MOVIE.value,
+                record.ids,
+                getattr(record.plex_obj, "title", None),
+            )
+
+            if not metadata:
                 return None
 
-            # --- Resolve Show Metadata by priority ---
-            record.show_ids = self._get_ids_dict_from_guids(show)
-            show_metadata, source, show_source_id = helpers.get_metadata_by_priority(
+            item = helpers.get_or_create_item(
+                MediaTypes.MOVIE.value,
+                source.value,
+                source_id,
+                metadata,
+            )
+
+            recent = app.models.Movie.objects.filter(user=self.user, item=item, end_date__gte=one_hour_ago,).first()
+            if recent:
+                if watched_at > recent.end_date:
+                    recent.end_date = watched_at
+                    recent.save(update_fields=["end_date"])
+                return recent
+
+            movie_obj = app.models.Movie.objects.create(user=self.user, item=item, end_date=watched_at, status=Status.COMPLETED.value,)
+            movie_obj._history_date = watched_at
+            return movie_obj
+
+        elif record.type == "episode":
+            record.show_ids = self._get_ids_dict_from_guids(record.show())
+            tv_metadata, source, source_id = helpers.get_metadata_by_priority(
                 MediaTypes.TV.value,
                 record.show_ids,
-                show.title,
+                getattr(record.plex_obj, "grandparentTitle", None),
             )
-            if not show_metadata:
-                self.warnings.append(f"Show {show.title} could not be resolved via metadata providers")
+
+            if not tv_metadata:
                 return None
 
-            # --- Check or create TV show item ---
-            tv_item = helpers.get_or_create_item(MediaTypes.TV.value, source.value, show_source_id, show_metadata)
+            season_number = getattr(record.plex_obj, "parentIndex", 1)
+            episode_number = getattr(record.plex_obj, "index", 1)
 
             season_metadata, season_source, season_source_id = helpers.get_metadata_by_priority(
                 MediaTypes.SEASON.value,
                 record.show_ids,
-                show.title,
+                getattr(record.plex_obj, "grandparentTitle", None),
                 season_number=season_number,
                 source_found=source.value,
             )
 
             if not season_metadata:
-                if not (found_info := helpers.TMDBResolver(history_record=record).resolve()):
-                    logger.warning(f"{show.title} S{season_number}: not found in {source.label} with ID {show_source_id}.")
-                    return
-
-                season_number = found_info["season_number"]
-                episode_number = found_info["episode_number"]
-                season_metadata, season_source, season_source_id = helpers.get_metadata_by_priority(
-                    MediaTypes.SEASON.value,
-                    record.show_ids,
-                    record.plex_obj.grandparentTitle,
-                    season_number=season_number,
-                )
-
-            if not season_metadata:
-                self.warnings.append(f"Season {season_number} of {show.title} could not be resolved")
                 return None
 
-            # --- Validate Episode existence ---
             episode_exists = any(
                 ep["episode_number"] == episode_number for ep in season_metadata.get("episodes", [])
             )
             if not episode_exists:
-                self.warnings.append(f"Episode S{season_number}E{episode_number} of {show.title} not found")
+                self.warnings.append(f"Episode S{season_number}E{episode_number} of {getattr(record.plex_obj, 'grandparentTitle', None)} not found")
                 return None
 
-            # --- Get episode image ---
             episode_image = self._get_episode_image(episode_number, season_metadata)
-            episode_metadata = {"title": show_metadata.get("title", show.title), "image": episode_image}
+            tv_item = helpers.get_or_create_item(
+                MediaTypes.TV.value,
+                source.value,
+                source_id,
+                tv_metadata,
+            )
+            helpers.queue_external_ids(self.external_ids, record.show_ids, tv_item)
 
-            # --- Check or create Episode item ---
+            season_item = helpers.get_or_create_item(
+                MediaTypes.SEASON.value,
+                tv_item.source,
+                source_id,
+                season_metadata,
+                season_number,
+            )
+
+            episode_metadata = {
+                "title": tv_metadata.get("title"),
+                "image": episode_image,
+            }
+
             episode_item = helpers.get_or_create_item(
                 MediaTypes.EPISODE.value,
                 tv_item.source,
-                show_source_id,
+                source_id,
                 episode_metadata,
                 season_number,
                 episode_number,
             )
-            helpers.queue_external_ids(self.external_ids, self._get_ids_dict_from_guids(record), episode_item)
+            helpers.queue_external_ids(self.external_ids, record.ids, episode_item)
+            tv_obj, _ = app.models.TV.objects.get_or_create(
+                user=self.user,
+                item=tv_item,
+                defaults={"status": Status.IN_PROGRESS.value},
+            )
+            tv_obj._history_date = watched_at
+            season_obj, _ = app.models.Season.objects.get_or_create(
+                user=self.user,
+                item=season_item,
+                defaults={
+                    "related_tv": tv_obj,
+                    "status": Status.IN_PROGRESS.value,
+                },
+            )
+            season_obj._history_date = watched_at
+            recent = app.models.Episode.objects.filter(
+                item=episode_item,
+                related_season=season_obj,
+                end_date__gte=one_hour_ago,
+            ).first()
 
-            return episode_item
-        except Exception as e:
-            import sys
-            tb_line = sys.exc_info()[-1].tb_lineno
-            logger.error("Error on line %d - %s - %s", tb_line, type(e).__name__, e)
+            if recent:
+                if watched_at > recent.end_date:
+                    recent.end_date = watched_at
+                    recent.save(update_fields=["end_date"])
+                return recent
 
-    @staticmethod
-    def _extract_source_id(plex_item, source_enum):
-        """
-        Extract the metadata source ID from a Plex item using the given source enum.
-        """
-        prefix_map = {s.name: f"{s.name.lower()}:" for s in Sources}
-        prefix = prefix_map.get(source_enum.name)
-        if not prefix:
-            return None
-        return next((g.id.split("://")[-1] for g in plex_item.guids if g.id.startswith(prefix)), None)
+            episode_obj = app.models.Episode.objects.create(
+                item=episode_item,
+                related_season=season_obj,
+                end_date=watched_at,
+            )
+            episode_obj._history_date = watched_at
 
-    @staticmethod
-    def parse_history_key(record):
-        return str(record.historyKey).rsplit("/", 1)[-1]
+            self._update_completion_status(
+                season_obj,
+                tv_obj,
+                season_number,
+                episode_number,
+                season_metadata,
+                tv_metadata,
+            )
+
+            return episode_obj
+
+        return None
+
+    def _update_completion_status(
+        self,
+        season_obj,
+        tv_obj,
+        season_number,
+        episode_number,
+        season_metadata,
+        tv_metadata,
+    ):
+        """Update completion status for season and TV show if applicable."""
+        if episode_number == season_metadata["max_progress"]:
+            season_obj.status = Status.COMPLETED.value
+
+            last_season = tv_metadata.get("last_episode_season")
+            if last_season and last_season == season_number:
+                tv_obj.status = Status.COMPLETED.value
 
     @staticmethod
     def _get_ids_dict_from_guids(plex_item):
-        ids = {}
-        for guid in plex_item.guids:
+        ids = {"plex": plex_item.ratingKey}
+        for guid in getattr(plex_item, "guids", []):
             try:
-                parts = guid.id.split("://", 1)
-                if len(parts) == 2:
-                    ids[parts[0]] = parts[1]
+                prefix, value = guid.id.split("://", 1)
+                ids[prefix] = value
             except Exception:
                 continue
         return ids
-
     def _get_episode_image(self, episode_number, season_metadata):
         """Extract episode image URL from season metadata."""
         # for episode in season_metadata["episodes"]:

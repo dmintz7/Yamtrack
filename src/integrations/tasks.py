@@ -30,6 +30,7 @@ from integrations.imports import (
     trakt,
     yamtrack,
 )
+from integrations.imports.plex import session_watch_sync
 
 logger = logging.getLogger(__name__)
 ERROR_TITLE = "\n\n\n Couldn't import the following media: \n\n"
@@ -236,6 +237,12 @@ def import_plex_history_recurring(user_id):
     """Task to display in recurring section"""
     return import_plex(None, user_id, mode="new")
 
+
+@shared_task(name="Scrobble Plex sessions (Recurring)")
+def scrobble_plex_sessions(user_id):
+    """Task to display in recurring section"""
+    user = get_user_model().objects.get(id=user_id)
+    return session_watch_sync(user)
 
 @shared_task(name="Import from Pocket Casts")
 def import_pocketcasts(user_id, mode="new"):
