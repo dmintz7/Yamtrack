@@ -3055,7 +3055,7 @@ class PodcastEpisode(models.Model):
         blank=True,
         help_text="Duration in seconds",
     )
-    audio_url = models.URLField(blank=True, default="")
+    audio_url = models.URLField(blank=True, default="", max_length=1000)
     episode_number = models.PositiveIntegerField(null=True, blank=True)
     season_number = models.PositiveIntegerField(null=True, blank=True)
     file_type = models.CharField(max_length=50, blank=True, default="")
