@@ -54,6 +54,10 @@ class Migration(migrations.Migration):
     operations = [
         RemoveConstraintIfExists(
             model_name="user",
+            name="home_sort_valid",
+        ),
+        migrations.RemoveConstraint(
+            model_name="user",
             name="list_detail_sort_valid",
         ),
         migrations.AlterField(

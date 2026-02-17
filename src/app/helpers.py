@@ -9,6 +9,7 @@ from django.utils.encoding import iri_to_uri
 from django.utils.http import url_has_allowed_host_and_scheme
 
 from app.models import BasicMedia, CollectionEntry, MediaTypes
+from app.providers import services
 
 
 def minutes_to_hhmm(total_minutes):
