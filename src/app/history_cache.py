@@ -21,6 +21,7 @@ from app.models import (
     Episode,
     Game,
     Item,
+    ItemPersonCredit,
     MediaTypes,
     Movie,
     Music,
@@ -520,6 +521,8 @@ def build_history_days(user, filters=None, date_filters=None, logging_style_over
             - artist: Filter music entries by album__artist_id
             - tv: Filter episodes by related_season__related_tv_id
             - season: Filter episodes by related_season_id
+            - person_source: Filter movie/TV plays by credited person source (e.g. "tmdb")
+            - person_id: Filter movie/TV plays by credited provider person ID
             - media_id: Filter entries by item media_id
             - source: Filter entries by item source
             - season_number: Filter episodes by season number (requires media_id/source)
@@ -575,10 +578,16 @@ def build_history_days(user, filters=None, date_filters=None, logging_style_over
     target_source = filters.get('source')
     season_number_filter = filters.get('season_number')
     podcast_show_filter = filters.get('podcast_show')
+    person_source_filter = filters.get("person_source")
+    person_id_filter = filters.get("person_id")
     if target_media_id is not None:
         target_media_id = str(target_media_id)
     if target_source is not None:
         target_source = str(target_source)
+    if person_source_filter is not None:
+        person_source_filter = str(person_source_filter)
+    if person_id_filter is not None:
+        person_id_filter = str(person_id_filter)
 
     episodes_start = time.perf_counter()
     episodes = (
@@ -605,6 +614,33 @@ def build_history_days(user, filters=None, date_filters=None, logging_style_over
         episodes = episodes.filter(related_season__related_tv_id=filters['tv'])
     if filters.get('season'):
         episodes = episodes.filter(related_season_id=filters['season'])
+    if person_source_filter and person_id_filter:
+        episode_person_credits = ItemPersonCredit.objects.filter(
+            item_id=models.OuterRef("item_id"),
+        )
+        episode_person_matches = episode_person_credits.filter(
+            person__source=person_source_filter,
+            person__source_person_id=person_id_filter,
+        )
+        show_person_matches = ItemPersonCredit.objects.filter(
+            item_id=models.OuterRef("related_season__related_tv__item_id"),
+            person__source=person_source_filter,
+            person__source_person_id=person_id_filter,
+        )
+        episodes = episodes.annotate(
+            has_episode_people=models.Exists(episode_person_credits),
+            has_episode_person=models.Exists(episode_person_matches),
+            has_show_person=models.Exists(show_person_matches),
+        ).filter(
+            (
+                models.Q(has_episode_people=True)
+                & models.Q(has_episode_person=True)
+            )
+            | (
+                models.Q(has_episode_people=False)
+                & models.Q(has_show_person=True)
+            ),
+        )
     if target_media_id and target_source and (
         media_type_filter == MediaTypes.TV.value
         or filters.get('tv')
@@ -649,6 +685,11 @@ def build_history_days(user, filters=None, date_filters=None, logging_style_over
             item__media_id=target_media_id,
             item__source=target_source,
         )
+    if person_source_filter and person_id_filter:
+        movies_qs = movies_qs.filter(
+            item__person_credits__person__source=person_source_filter,
+            item__person_credits__person__source_person_id=person_id_filter,
+        ).distinct()
 
     movies = movies_qs.order_by("-end_date")
     movie_play_counts = (
@@ -798,7 +839,14 @@ def build_history_days(user, filters=None, date_filters=None, logging_style_over
     has_music_filter = bool(filters.get('album') or filters.get('artist'))
     has_tv_filter = bool(filters.get('tv') or filters.get('season') or season_number_filter is not None)
     has_podcast_filter = bool(podcast_show_filter)
-    process_all = not (has_music_filter or has_tv_filter or has_podcast_filter or media_type_filter)
+    has_person_filter = bool(person_source_filter and person_id_filter)
+    process_all = not (
+        has_music_filter
+        or has_tv_filter
+        or has_podcast_filter
+        or has_person_filter
+        or media_type_filter
+    )
     
     # Helper function to check if entry matches genre filter by checking metadata.
     # Uses a cache to avoid repeated metadata lookups for the same media item.
@@ -883,7 +931,7 @@ def build_history_days(user, filters=None, date_filters=None, logging_style_over
 
     # Build a lookup of episode titles from stored items to avoid provider calls
     # Only if we're processing episodes
-    if process_all or has_tv_filter or media_type_filter == MediaTypes.TV.value:
+    if process_all or has_tv_filter or has_person_filter or media_type_filter == MediaTypes.TV.value:
         episode_keys = []
         for ep in episodes:
             ep_item = getattr(ep, "item", None)
@@ -934,7 +982,7 @@ def build_history_days(user, filters=None, date_filters=None, logging_style_over
                 entry_counts["episodes"] += 1
 
     # Process movies only if not filtering by specific media type or if filtering by movie
-    if process_all or media_type_filter == MediaTypes.MOVIE.value:
+    if process_all or has_person_filter or media_type_filter == MediaTypes.MOVIE.value:
         for movie in movies:
             # Apply genre filter if specified
             if genre_filter and not matches_genre(movie, MediaTypes.MOVIE.value):

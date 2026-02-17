@@ -104,6 +104,8 @@ class Item(CalendarTriggerMixin, models.Model):
     number_of_pages = models.PositiveIntegerField(null=True, blank=True, help_text="Number of pages for books")
     release_datetime = models.DateTimeField(null=True, blank=True)
     genres = models.JSONField(default=list, blank=True)
+    series_name = models.TextField(null=True, blank=True)
+    series_position = models.FloatField(null=True, blank=True)
 
     class Meta:
         """Meta options for the model."""
@@ -260,6 +262,10 @@ class MetadataBackfillField(models.TextChoices):
 
     RUNTIME = "runtime", "Runtime"
     GENRES = "genres", "Genres"
+    CREDITS = "credits", "Credits"
+
+
+CREDITS_BACKFILL_VERSION = 2
 
 
 class MetadataBackfillState(models.Model):
@@ -275,6 +281,7 @@ class MetadataBackfillState(models.Model):
         choices=MetadataBackfillField.choices,
     )
     fail_count = models.PositiveIntegerField(default=0)
+    strategy_version = models.PositiveIntegerField(default=1)
     last_attempt_at = models.DateTimeField(null=True, blank=True)
     next_retry_at = models.DateTimeField(null=True, blank=True)
     last_success_at = models.DateTimeField(null=True, blank=True)
@@ -295,6 +302,168 @@ class MetadataBackfillState(models.Model):
             models.Index(fields=["field", "give_up"]),
         ]
 
+
+
+class PersonGender(models.TextChoices):
+    """Normalized person genders used across providers."""
+
+    UNKNOWN = "unknown", "Unknown"
+    FEMALE = "female", "Female"
+    MALE = "male", "Male"
+    NON_BINARY = "non_binary", "Non-binary"
+
+
+class CreditRoleType(models.TextChoices):
+    """Credit role category."""
+
+    CAST = "cast", "Cast"
+    CREW = "crew", "Crew"
+
+
+class Person(models.Model):
+    """Known cast/crew person."""
+
+    source = models.CharField(
+        max_length=20,
+        choices=Sources.choices,
+        default=Sources.TMDB.value,
+    )
+    source_person_id = models.CharField(max_length=32)
+    name = models.CharField(max_length=255)
+    image = models.URLField(blank=True, default="")
+    known_for_department = models.CharField(max_length=120, blank=True, default="")
+    biography = models.TextField(blank=True, default="")
+    gender = models.CharField(
+        max_length=20,
+        choices=PersonGender.choices,
+        default=PersonGender.UNKNOWN.value,
+    )
+    birth_date = models.DateField(null=True, blank=True)
+    death_date = models.DateField(null=True, blank=True)
+    place_of_birth = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        """Meta options for the model."""
+
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "source_person_id"],
+                name="%(app_label)s_%(class)s_unique_source_person",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["source", "source_person_id"]),
+        ]
+
+    def __str__(self):
+        """Return the person name."""
+        return self.name
+
+
+class Studio(models.Model):
+    """Studio/company associated with a media item."""
+
+    source = models.CharField(
+        max_length=20,
+        choices=Sources.choices,
+        default=Sources.TMDB.value,
+    )
+    source_studio_id = models.CharField(max_length=32)
+    name = models.CharField(max_length=255)
+    logo = models.URLField(blank=True, default="")
+
+    class Meta:
+        """Meta options for the model."""
+
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "source_studio_id"],
+                name="%(app_label)s_%(class)s_unique_source_studio",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["source", "source_studio_id"]),
+        ]
+
+    def __str__(self):
+        """Return the studio name."""
+        return self.name
+
+
+class ItemPersonCredit(models.Model):
+    """Cast/crew credits connecting media items and people."""
+
+    item = models.ForeignKey(
+        Item,
+        on_delete=models.CASCADE,
+        related_name="person_credits",
+    )
+    person = models.ForeignKey(
+        Person,
+        on_delete=models.CASCADE,
+        related_name="item_credits",
+    )
+    role_type = models.CharField(max_length=10, choices=CreditRoleType.choices)
+    role = models.CharField(max_length=255, blank=True, default="")
+    department = models.CharField(max_length=120, blank=True, default="")
+    sort_order = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        """Meta options for the model."""
+
+        ordering = ["sort_order", "person__name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["item", "person", "role_type", "role", "department"],
+                name="%(app_label)s_%(class)s_unique_credit",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["item", "role_type"]),
+            models.Index(fields=["person", "role_type"]),
+            models.Index(fields=["department"]),
+        ]
+
+    def __str__(self):
+        """Return the credit label."""
+        return f"{self.person} - {self.role_type}"
+
+
+class ItemStudioCredit(models.Model):
+    """Studio/company links for media items."""
+
+    item = models.ForeignKey(
+        Item,
+        on_delete=models.CASCADE,
+        related_name="studio_credits",
+    )
+    studio = models.ForeignKey(
+        Studio,
+        on_delete=models.CASCADE,
+        related_name="item_credits",
+    )
+    sort_order = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        """Meta options for the model."""
+
+        ordering = ["sort_order", "studio__name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["item", "studio"],
+                name="%(app_label)s_%(class)s_unique_item_studio",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["item"]),
+            models.Index(fields=["studio"]),
+        ]
+
+    def __str__(self):
+        """Return the studio credit label."""
+        return f"{self.studio} - {self.item}"
 
 
 class MediaManager(models.Manager):
