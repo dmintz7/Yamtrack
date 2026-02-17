@@ -58,7 +58,11 @@ SOURCES_CONFIG = {
         "logo": static("img/logo-goodreads.svg"),
     },
     "plex": {
-        "name": "Plex",
+        "name": "Plex - History",
+        "logo": static("img/plex-logo.svg"),
+    },
+    "plex_scrobble": {
+        "name": "Plex - Scrobble",
         "logo": static("img/plex-logo.svg"),
     },
     "pocketcasts": {

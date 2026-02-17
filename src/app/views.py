@@ -2768,7 +2768,7 @@ def media_details(
         from app.helpers import get_item_collection_entries, get_tv_show_collection_stats
         
         try:
-            item = Item.objects.get(
+            item_obj = Item.objects.get(
                 media_id=media_id,
                 source=source,
                 media_type=media_type,
@@ -2780,7 +2780,7 @@ def media_details(
             if media_type in (MediaTypes.TV.value, MediaTypes.ANIME.value):
                 # Use episode count from metadata if available to match Details pane
                 metadata_episode_count = media_metadata.get("details", {}).get("episodes") or media_metadata.get("episodes")
-                collection_stats = get_tv_show_collection_stats(request.user, item, metadata_episode_count=metadata_episode_count)
+                collection_stats = get_tv_show_collection_stats(request.user, item_obj, metadata_episode_count=metadata_episode_count)
             
             # If no collection entry exists and auto-fetch is supported, trigger background fetch
             if not collection_entry and config.supports_collection_auto_fetch(media_type):
@@ -2788,11 +2788,11 @@ def media_details(
                 if plex_account and plex_account.plex_token:
                     from integrations.tasks import fetch_collection_metadata_for_item
                     # Trigger background task to fetch collection data
-                    fetch_collection_metadata_for_item.delay(user_id=request.user.id, item_id=item.id)
+                    fetch_collection_metadata_for_item.delay(user_id=request.user.id, item_id=item_obj.id)
                     # Use module-level logger directly to avoid UnboundLocalError
-                    logging.getLogger(__name__).info("Triggered background collection fetch for %s - %s (item_id=%s)", request.user.username, item.title, item.id)
+                    logging.getLogger(__name__).info("Triggered background collection fetch for %s - %s (item_id=%s)", request.user.username, item_obj.title, item_obj.id)
                     fetching_collection_data = True
-                    item_id_for_polling = item.id
+                    item_id_for_polling = item_obj.id
         except Item.DoesNotExist:
             pass
 
@@ -8709,7 +8709,7 @@ def collection_add(request):
         return _collection_redirect(request)
 
     try:
-        item = Item.objects.get(id=item_id)
+        item_obj = Item.objects.get(id=item_id)
     except Item.DoesNotExist:
         if request.headers.get("HX-Request"):
             return HttpResponseBadRequest("Item not found")
@@ -8729,7 +8729,7 @@ def collection_add(request):
     if form.is_valid():
         entry = form.save(commit=False)
         entry.user = request.user
-        entry.item = item
+        entry.item = item_obj
         entry.save()
 
         # Collection-only games do not appear in the games media list.
@@ -8942,8 +8942,8 @@ def collection_status_api(request, item_id):
     from app.helpers import is_item_collected
     
     try:
-        item = Item.objects.get(id=item_id)
-        collection_entry = is_item_collected(request.user, item)
+        item_obj = Item.objects.get(id=item_id)
+        collection_entry = is_item_collected(request.user, item_obj)
         
         return JsonResponse({
             "has_collection_data": collection_entry is not None,
