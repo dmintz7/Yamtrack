@@ -3,6 +3,7 @@
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+from app.models import MediaTypes
 
 
 class PlexAccount(models.Model):
@@ -220,3 +221,13 @@ class TraktAccount(models.Model):
     def is_configured(self):
         """Return True when client credentials are stored."""
         return bool(self.client_id and self.client_secret)
+
+
+class UnresolvedImport(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="unresolved_media",)
+    metadata_source = models.CharField(max_length=20)
+    metadata_source_identifier = models.CharField(max_length=128)
+    media_type = models.CharField(max_length=20, choices=MediaTypes.choices)
+    raw_data = models.JSONField(null=True, blank=True)
+    found_metadata_source = models.CharField(max_length=128, blank=True, null=True)
+    found_metadata_source_identifier = models.CharField(max_length=128, blank=True, null=True)

@@ -21,6 +21,7 @@ from app.providers import (
     openlibrary,
     pocketcasts,
     tmdb,
+    get_tv_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -218,10 +219,12 @@ def get_media_metadata(
         MediaTypes.MANGA.value: lambda: mangaupdates.manga(media_id)
         if source == Sources.MANGAUPDATES.value
         else mal.manga(media_id),
-        MediaTypes.TV.value: lambda: tmdb.tv(media_id),
-        "tv_with_seasons": lambda: tmdb.tv_with_seasons(media_id, season_numbers),
-        MediaTypes.SEASON.value: tmdb_season_metadata,
-        MediaTypes.EPISODE.value: lambda: tmdb.episode(
+        MediaTypes.TV.value: lambda: get_tv_provider(source).tv(media_id),
+        "tv_with_seasons": lambda: get_tv_provider(source).tv_with_seasons(media_id, season_numbers),
+        MediaTypes.SEASON.value: lambda: get_tv_provider(source).tv_with_seasons(media_id, season_numbers)[
+            f"season/{season_numbers[0]}"
+        ],
+        MediaTypes.EPISODE.value: lambda: get_tv_provider(source).episode(
             media_id,
             season_numbers[0],
             episode_number,
@@ -276,10 +279,10 @@ def search(media_type, query, page, source=None):
             response = mal.search(media_type, query, page)
     elif media_type == MediaTypes.ANIME.value:
         response = mal.search(media_type, query, page)
-    elif media_type in (MediaTypes.TV.value, MediaTypes.MOVIE.value):
+    elif media_type == MediaTypes.MOVIE.value:
         response = tmdb.search(media_type, query, page)
-    elif media_type in (MediaTypes.SEASON.value, MediaTypes.EPISODE.value):
-        response = tmdb.search(MediaTypes.TV.value, query, page)
+    elif media_type in (MediaTypes.TV.value, MediaTypes.SEASON.value, MediaTypes.EPISODE.value):
+        response = get_tv_provider(source).search(MediaTypes.TV.value, query, page)
     elif media_type == MediaTypes.GAME.value:
         response = igdb.search(query, page)
     elif media_type == MediaTypes.BOOK.value:
