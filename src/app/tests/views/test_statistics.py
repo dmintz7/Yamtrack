@@ -1,5 +1,6 @@
 from datetime import timedelta
-from unittest.mock import patch
+import re
+from unittest.mock import call, patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -7,7 +8,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from app import statistics_cache
+from app import history_cache, statistics_cache
 from app.models import (
     Book,
     Comic,
@@ -166,6 +167,204 @@ class StatisticsViewTests(TestCase):
         self.assertIn("Adventure", book_genres)
         self.assertIn("Sci-Fi", comic_genres)
         self.assertIn("Shonen", manga_genres)
+        response_body = response.content.decode()
+        self.assertRegex(
+            response_body,
+            r"·\s*\d+\s+books?",
+        )
+        self.assertRegex(
+            response_body,
+            r"·\s*\d+\s+comics?",
+        )
+        self.assertRegex(
+            response_body,
+            r"·\s*\d+\s+manga\b",
+        )
+
+    def test_updating_reading_scores_refreshes_top_rated_cards(self):
+        """Updating reading scores should invalidate day caches used by top-rated cards."""
+        cache.clear()
+        self.client.login(**self.credentials)
+        now = timezone.now()
+
+        book_item = Item.objects.create(
+            media_id="book-rated-1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Rated Book",
+            image="http://example.com/rated-book.jpg",
+            genres=["Fantasy"],
+        )
+        comic_item = Item.objects.create(
+            media_id="comic-rated-1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.COMIC.value,
+            title="Rated Comic",
+            image="http://example.com/rated-comic.jpg",
+            genres=["Sci-Fi"],
+        )
+        manga_item = Item.objects.create(
+            media_id="manga-rated-1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.MANGA.value,
+            title="Rated Manga",
+            image="http://example.com/rated-manga.jpg",
+            genres=["Shonen"],
+        )
+
+        book_entry = Book.objects.create(
+            user=self.user,
+            item=book_item,
+            status=Status.IN_PROGRESS.value,
+            progress=180,
+            start_date=now - timedelta(days=125),
+            end_date=now - timedelta(days=120),
+            score=None,
+        )
+        comic_entry = Comic.objects.create(
+            user=self.user,
+            item=comic_item,
+            status=Status.IN_PROGRESS.value,
+            progress=75,
+            start_date=now - timedelta(days=115),
+            end_date=now - timedelta(days=110),
+            score=None,
+        )
+        manga_entry = Manga.objects.create(
+            user=self.user,
+            item=manga_item,
+            status=Status.IN_PROGRESS.value,
+            progress=95,
+            start_date=now - timedelta(days=105),
+            end_date=now - timedelta(days=100),
+            score=None,
+        )
+
+        statistics_cache.refresh_statistics_cache(self.user.id, "All Time")
+        stale_response = self.client.get(reverse("statistics") + "?start-date=all&end-date=all")
+        self.assertEqual(stale_response.context["top_rated_book"], [])
+        self.assertEqual(stale_response.context["top_rated_comic"], [])
+        self.assertEqual(stale_response.context["top_rated_manga"], [])
+
+        self.assertEqual(
+            self.client.post(
+                reverse("update_media_score", args=[MediaTypes.BOOK.value, book_entry.id]),
+                {"score": "8"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                reverse("update_media_score", args=[MediaTypes.COMIC.value, comic_entry.id]),
+                {"score": "7"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                reverse("update_media_score", args=[MediaTypes.MANGA.value, manga_entry.id]),
+                {"score": "9"},
+            ).status_code,
+            200,
+        )
+
+        statistics_cache.refresh_statistics_cache(self.user.id, "All Time")
+        refreshed_response = self.client.get(reverse("statistics") + "?start-date=all&end-date=all")
+
+        book_titles = [media.item.title for media in refreshed_response.context["top_rated_book"]]
+        comic_titles = [media.item.title for media in refreshed_response.context["top_rated_comic"]]
+        manga_titles = [media.item.title for media in refreshed_response.context["top_rated_manga"]]
+
+        self.assertIn("Rated Book", book_titles)
+        self.assertIn("Rated Comic", comic_titles)
+        self.assertIn("Rated Manga", manga_titles)
+
+    def test_refresh_statistics_cache_repairs_stale_reading_score_days(self):
+        """All-time refresh should rebuild stale reading score days missed by older invalidation logic."""
+        cache.clear()
+        self.client.login(**self.credentials)
+        now = timezone.now()
+
+        stale_cases = [
+            {
+                "cache_key": MediaTypes.BOOK.value,
+                "model": Book,
+                "media_type": MediaTypes.BOOK.value,
+                "media_id": "book-stale-score-1",
+                "title": "Stale Score Book",
+                "image": "http://example.com/stale-score-book.jpg",
+                "genres": ["Fantasy"],
+                "progress": 250,
+                "offset_days": 120,
+                "updated_score": 8,
+            },
+            {
+                "cache_key": MediaTypes.COMIC.value,
+                "model": Comic,
+                "media_type": MediaTypes.COMIC.value,
+                "media_id": "comic-stale-score-1",
+                "title": "Stale Score Comic",
+                "image": "http://example.com/stale-score-comic.jpg",
+                "genres": ["Sci-Fi"],
+                "progress": 120,
+                "offset_days": 121,
+                "updated_score": 9,
+            },
+            {
+                "cache_key": MediaTypes.MANGA.value,
+                "model": Manga,
+                "media_type": MediaTypes.MANGA.value,
+                "media_id": "manga-stale-score-1",
+                "title": "Stale Score Manga",
+                "image": "http://example.com/stale-score-manga.jpg",
+                "genres": ["Shonen"],
+                "progress": 85,
+                "offset_days": 122,
+                "updated_score": 10,
+            },
+        ]
+        created_entries = []
+        for case in stale_cases:
+            item = Item.objects.create(
+                media_id=case["media_id"],
+                source=Sources.MANUAL.value,
+                media_type=case["media_type"],
+                title=case["title"],
+                image=case["image"],
+                genres=case["genres"],
+            )
+            entry = case["model"].objects.create(
+                user=self.user,
+                item=item,
+                status=Status.COMPLETED.value,
+                progress=case["progress"],
+                start_date=None,
+                end_date=now - timedelta(days=case["offset_days"]),
+                score=None,
+            )
+            created_entries.append((case, item, entry))
+
+        statistics_cache.refresh_statistics_cache(self.user.id, "All Time")
+        for case, item, entry in created_entries:
+            stale_day_key = history_cache.history_day_key(entry.end_date)
+            stale_cache_key = statistics_cache._day_cache_key(self.user.id, stale_day_key)
+            stale_day_payload = cache.get(stale_cache_key)
+            stale_item_payload = stale_day_payload["items"][case["cache_key"]][str(item.id)]
+            self.assertIsNone(stale_item_payload["score"])
+
+        # Simulate legacy score updates that didn't invalidate day caches.
+        for case, _item, entry in created_entries:
+            case["model"].objects.filter(id=entry.id).update(score=case["updated_score"])
+
+        statistics_cache.refresh_statistics_cache(self.user.id, "All Time")
+        refreshed_response = self.client.get(reverse("statistics") + "?start-date=all&end-date=all")
+        book_titles = [media.item.title for media in refreshed_response.context["top_rated_book"]]
+        comic_titles = [media.item.title for media in refreshed_response.context["top_rated_comic"]]
+        manga_titles = [media.item.title for media in refreshed_response.context["top_rated_manga"]]
+
+        self.assertIn("Stale Score Book", book_titles)
+        self.assertIn("Stale Score Comic", comic_titles)
+        self.assertIn("Stale Score Manga", manga_titles)
 
     @patch("app.providers.services.get_media_metadata")
     def test_statistics_view_returns_empty_reading_top_genres_when_items_have_no_genres(self, mock_get_metadata):
@@ -232,6 +431,41 @@ class StatisticsViewTests(TestCase):
         self.assertEqual(response.context["book_consumption"]["top_genres"], [])
         self.assertEqual(response.context["comic_consumption"]["top_genres"], [])
         self.assertEqual(response.context["manga_consumption"]["top_genres"], [])
+
+    @patch("app.models.providers.services.get_media_metadata")
+    @patch("app.tasks.enqueue_genre_backfill_items")
+    def test_build_history_day_enqueues_genre_backfill_for_reading_entries_with_missing_genres(
+        self,
+        mock_enqueue_genre_backfill_items,
+        _mock_get_media_metadata,
+    ):
+        """Reading entries missing genres should enqueue genre backfill item IDs."""
+        _mock_get_media_metadata.return_value = {"max_progress": 120}
+        cache.clear()
+        now = timezone.now()
+        book_item = Item.objects.create(
+            media_id="book-missing-genre",
+            source=Sources.OPENLIBRARY.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Book Missing Genre",
+            image="http://example.com/book-missing-genre.jpg",
+            genres=[],
+        )
+        Book.objects.create(
+            user=self.user,
+            item=book_item,
+            status=Status.IN_PROGRESS.value,
+            progress=120,
+            start_date=now - timedelta(days=1),
+            end_date=now,
+        )
+
+        statistics_cache.build_stats_for_day(self.user.id, now.date())
+
+        self.assertIn(
+            call([book_item.id]),
+            mock_enqueue_genre_backfill_items.mock_calls,
+        )
 
     @patch("app.statistics_cache._aggregate_top_talent")
     def test_statistics_all_time_uses_aware_boundaries_for_top_talent(self, mock_top_talent):
