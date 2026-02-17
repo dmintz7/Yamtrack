@@ -1911,7 +1911,7 @@ class PlexHistorySync(PlexBase):
 
             self._update_history(record, item)
         except Exception as e:
-            logger.exception(f"History record processing failed on line {type(e.__name__)} - {sys.exc_info()[-1].tb_lineno} - {e}")
+            logger.exception(f"History record processing failed on line {type(e).__name__} - {sys.exc_info()[-1].tb_lineno} - {e}")
 
     def _update_history(self, record, item):
         viewed_at = timezone.make_aware(record.viewedAt, timezone=timezone.get_current_timezone(),)
