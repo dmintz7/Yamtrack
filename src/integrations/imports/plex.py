@@ -1693,6 +1693,45 @@ class PlexBase:
     def get_sys_account(self):
         return next((acct for acct in self.plex.systemAccounts() if acct.name == self.plex_account.plex_username), None, )
 
+    def _update_completion_status(
+        self,
+        season_obj,
+        tv_obj,
+        season_number,
+        episode_number,
+        season_metadata,
+        tv_metadata,
+    ):
+        """Update completion status for season and TV show if applicable."""
+        if episode_number == season_metadata["max_progress"]:
+            season_obj.status = Status.COMPLETED.value
+
+            last_season = tv_metadata.get("last_episode_season")
+            if last_season and last_season == season_number:
+                tv_obj.status = Status.COMPLETED.value
+
+    @staticmethod
+    def _get_ids_dict_from_guids(plex_item):
+        ids = {"plex": plex_item.ratingKey}
+        for guid in getattr(plex_item, "guids", []):
+            try:
+                prefix, value = guid.id.split("://", 1)
+                ids[prefix] = value
+            except Exception:
+                continue
+        return ids
+
+    def _get_episode_image(self, episode_number, season_metadata):
+        """Extract episode image URL from season metadata."""
+        # for episode in season_metadata["episodes"]:
+        #     if episode["episode_number"] == episode_number:
+        #         if episode.get("image"):
+        #             return episode["image"]
+        #         elif episode.get("still_path"):
+        #             return f"https://image.tmdb.org/t/p/w500{episode['still_path']}"
+        #         break
+        return settings.IMG_NONE
+
     @staticmethod
     def source_priority(media_type):
         """
@@ -1869,7 +1908,7 @@ class PlexHistorySync(PlexBase):
         logger.info(f"Retrieved {len(history_records)} Plex History records, Finding Existing Records")
         self.existing_history = {str(h.plex_history_id): h for h in PlexHistory.objects.all()}
         logger.info(f"Found {len(self.existing_history)} existing Plex History records, processing records")
-        for record in history_records:
+        for record in reversed(history_records):
             self._process_record(record)
 
         if self.batch_to_create:
@@ -2137,44 +2176,6 @@ class PlexSessionWatcher(PlexBase):
             return episode_obj
 
         return None
-
-    def _update_completion_status(
-        self,
-        season_obj,
-        tv_obj,
-        season_number,
-        episode_number,
-        season_metadata,
-        tv_metadata,
-    ):
-        """Update completion status for season and TV show if applicable."""
-        if episode_number == season_metadata["max_progress"]:
-            season_obj.status = Status.COMPLETED.value
-
-            last_season = tv_metadata.get("last_episode_season")
-            if last_season and last_season == season_number:
-                tv_obj.status = Status.COMPLETED.value
-
-    @staticmethod
-    def _get_ids_dict_from_guids(plex_item):
-        ids = {"plex": plex_item.ratingKey}
-        for guid in getattr(plex_item, "guids", []):
-            try:
-                prefix, value = guid.id.split("://", 1)
-                ids[prefix] = value
-            except Exception:
-                continue
-        return ids
-    def _get_episode_image(self, episode_number, season_metadata):
-        """Extract episode image URL from season metadata."""
-        # for episode in season_metadata["episodes"]:
-        #     if episode["episode_number"] == episode_number:
-        #         if episode.get("image"):
-        #             return episode["image"]
-        #         elif episode.get("still_path"):
-        #             return f"https://image.tmdb.org/t/p/w500{episode['still_path']}"
-        #         break
-        return settings.IMG_NONE
 
 
 def bulk_match_plex_history(batch_size=2000):
