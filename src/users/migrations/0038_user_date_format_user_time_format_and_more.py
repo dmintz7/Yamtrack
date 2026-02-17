@@ -47,7 +47,7 @@ class Migration(migrations.Migration):
             sql="ALTER TABLE users_user DROP CONSTRAINT IF EXISTS home_sort_valid;",
             reverse_sql=migrations.RunSQL.noop,
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(

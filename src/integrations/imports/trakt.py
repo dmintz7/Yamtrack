@@ -358,7 +358,7 @@ class TraktImporter:
             item_kwargs["episode_number"] = episode_number
 
         defaults = {
-            "title": metadata["title"],
+            **app.models.Item.title_fields_from_metadata(metadata),
             "image": metadata["image"],
         }
 
@@ -557,8 +557,13 @@ class TraktImporter:
         else:
             season_obj = self.media_instances[MediaTypes.SEASON.value][season_key][0]
 
-        # --- Create Episode item ---
-        episode_metadata = {"title": tv_metadata["title"], "image": episode_image}
+        # Create Episode item and object
+        episode_metadata = {
+            "title": tv_metadata["title"],
+            "original_title": tv_metadata.get("original_title"),
+            "localized_title": tv_metadata.get("localized_title"),
+            "image": episode_image,
+        }
         episode_item = self._get_or_create_item(
             MediaTypes.EPISODE.value,
             tv_item.source,

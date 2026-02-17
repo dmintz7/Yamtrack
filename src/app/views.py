@@ -16,12 +16,13 @@ from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.paginator import EmptyPage, Paginator
 from django.db import IntegrityError
-from django.db.models import prefetch_related_objects
+from django.db.models import F, Min, prefetch_related_objects
 from django.db.models.functions import ExtractDay, ExtractMonth
 from django.db.utils import OperationalError
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils import formats, timezone
 from django.utils.dateparse import parse_date
 from django.utils.timezone import datetime
@@ -35,7 +36,14 @@ from app import (
     helpers,
     history_cache,
     history_processor,
+    live_playback,
     statistics_cache,
+)
+from app.columns import (
+    resolve_column_config,
+    resolve_columns,
+    resolve_default_column_config,
+    sanitize_column_prefs,
 )
 
 # history_cache is imported above
@@ -55,6 +63,7 @@ from app.models import (
     BasicMedia,
     CollectionEntry,
     Episode,
+    Game,
     Item,
     MediaTypes,
     Movie,
@@ -107,11 +116,16 @@ class _DummyPodcastWrapper:
     def __init__(self, item):
         self.item = item
         self.id = 0
+        self.in_progress_instance_id = None
         self.history = _EmptyHistoryProxy()
 
     @property
     def completed_play_count(self):
         return 0
+
+    @property
+    def has_in_progress_entry(self):
+        return False
 
 
 @require_GET
@@ -422,6 +436,7 @@ def home(request):
             "current_sort": sort_by,
             "sort_choices": HomeSortChoices.choices,
             "items_limit": items_limit,
+            "active_playback_card": live_playback.build_home_playback_card(request.user),
         }
         return render(request, "app/home.html", context)
     except OperationalError as error:
@@ -434,8 +449,19 @@ def home(request):
             "sort_choices": HomeSortChoices.choices,
             "items_limit": 14,
             "database_error": True,
+            "active_playback_card": None,
         }
         return render(request, "app/home.html", context)
+
+
+def active_playback_fragment(request):
+    """HTMX fragment: return the active playback card or empty response."""
+    card = live_playback.build_home_playback_card(request.user)
+    if not card:
+        return HttpResponse("")
+    return render(request, "app/components/active_playback_card.html", {
+        "active_playback_card": card,
+    })
 
 
 @require_POST
@@ -485,8 +511,14 @@ def media_list(request, media_type):
     direction_param = request.GET.get("direction")
     direction_field = f"{media_type}_direction"
 
-    # If time_left sort is selected for non-TV media types, fallback to default
+    # Enforce media-type-specific sort options.
     if sort_filter == "time_left" and media_type != MediaTypes.TV.value:
+        sort_filter = "title"  # Default fallback
+        # Update the user's preference to the fallback
+        request.user.update_preference(f"{media_type}_sort", "title")
+        # Reset direction to the default for the fallback sort
+        direction_param = None
+    elif sort_filter == "plays" and media_type != MediaTypes.MOVIE.value:
         sort_filter = "title"  # Default fallback
         # Update the user's preference to the fallback
         request.user.update_preference(f"{media_type}_sort", "title")
@@ -521,6 +553,10 @@ def media_list(request, media_type):
 
     genre_filter = (request.GET.get("genre") or "").strip()
     year_filter = (request.GET.get("year") or "").strip()
+    release_filter = (request.GET.get("release") or "all").strip().lower()
+    valid_release_filters = {"all", "released", "not_released"}
+    if release_filter not in valid_release_filters:
+        release_filter = "all"
     source_filter = (request.GET.get("source") or "").strip()
     language_filter = (request.GET.get("language") or "").strip()
     country_filter = (request.GET.get("country") or "").strip()
@@ -589,6 +625,35 @@ def media_list(request, media_type):
     def _normalize_filter_value(value):
         return str(value or "").strip().lower()
 
+    def _release_date_from_value(value):
+        if value is None:
+            return None
+        if isinstance(value, date) and not hasattr(value, "hour"):
+            return value
+        if hasattr(value, "date"):
+            try:
+                if hasattr(value, "utcoffset") and timezone.is_aware(value):
+                    return timezone.localtime(value).date()
+            except Exception:
+                pass
+            try:
+                return value.date()
+            except Exception:
+                return None
+        return None
+
+    def _matches_release_filter_value(release_value, filter_value, today):
+        if filter_value == "all":
+            return True
+        release_date = _release_date_from_value(release_value)
+        if not release_date:
+            return filter_value == "not_released"
+        if filter_value == "released":
+            return release_date <= today
+        if filter_value == "not_released":
+            return release_date > today
+        return True
+
     _metadata_cache = {}
 
     def _cached_metadata_for_item(item):
@@ -602,6 +667,14 @@ def media_list(request, media_type):
         return cached
 
     def _extract_cached_languages(item):
+        """Extract languages from database or cached metadata."""
+        # First try database (authoritative source)
+        if item and hasattr(item, 'languages') and item.languages:
+            if isinstance(item.languages, list):
+                return [str(lang).strip() for lang in item.languages if str(lang).strip()]
+            return [str(item.languages).strip()] if str(item.languages).strip() else []
+
+        # Fall back to cache for backwards compatibility
         cached = _cached_metadata_for_item(item)
         if not isinstance(cached, dict):
             return []
@@ -614,6 +687,12 @@ def media_list(request, media_type):
         return [str(languages).strip()] if str(languages).strip() else []
 
     def _extract_cached_country(item):
+        """Extract country from database or cached metadata."""
+        # First try database (authoritative source)
+        if item and hasattr(item, 'country') and item.country:
+            return item.country.strip()
+
+        # Fall back to cache for backwards compatibility
         cached = _cached_metadata_for_item(item)
         if not isinstance(cached, dict):
             return ""
@@ -622,6 +701,14 @@ def media_list(request, media_type):
         return str(country).strip() if country else ""
 
     def _extract_cached_platforms(item):
+        """Extract platforms from database or cached metadata."""
+        # First try database (authoritative source)
+        if item and hasattr(item, 'platforms') and item.platforms:
+            if isinstance(item.platforms, list):
+                return [str(platform).strip() for platform in item.platforms if str(platform).strip()]
+            return [str(item.platforms).strip()] if str(item.platforms).strip() else []
+
+        # Fall back to cache for backwards compatibility
         cached = _cached_metadata_for_item(item)
         if not isinstance(cached, dict):
             return []
@@ -674,6 +761,20 @@ def media_list(request, media_type):
             media
             for media in media_items
             if getattr(getattr(media, "item", None), "source", None) == target
+        ]
+
+    def apply_release_filter(media_items, filter_value):
+        if filter_value == "all":
+            return media_items
+        today = timezone.localdate()
+        return [
+            media
+            for media in media_items
+            if _matches_release_filter_value(
+                getattr(getattr(media, "item", None), "release_datetime", None),
+                filter_value,
+                today,
+            )
         ]
 
     def apply_language_filter(media_items, filter_value):
@@ -829,6 +930,7 @@ def media_list(request, media_type):
     media_list = apply_collection_filter(media_list, collection_filter, request.user, media_type)
     media_list = apply_genre_filter(media_list, genre_filter)
     media_list = apply_year_filter(media_list, year_filter)
+    media_list = apply_release_filter(media_list, release_filter)
     media_list = apply_source_filter(media_list, source_filter)
     if media_type in (MediaTypes.TV.value, MediaTypes.MOVIE.value, MediaTypes.ANIME.value):
         media_list = apply_language_filter(media_list, language_filter)
@@ -838,10 +940,6 @@ def media_list(request, media_type):
 
     # Handle time_left sorting for TV shows
     if sort_filter == "time_left" and media_type == MediaTypes.TV.value:
-        import logging
-
-        logger = logging.getLogger(__name__)
-
         # Cache sorted results for 5 minutes to avoid expensive re-sorts
         cache_key = cache_utils.build_time_left_cache_key(
             request.user.id,
@@ -853,6 +951,7 @@ def media_list(request, media_type):
             collection_filter,
             genre_filter,
             year_filter,
+            release_filter,
             source_filter,
             language_filter,
             country_filter,
@@ -925,6 +1024,7 @@ def media_list(request, media_type):
         "current_collection": collection_filter,
         "current_genre": genre_filter,
         "current_year": year_filter,
+        "current_release": release_filter,
         "current_source": source_filter,
         "current_language": language_filter,
         "current_country": country_filter,
@@ -934,14 +1034,13 @@ def media_list(request, media_type):
         "status_choices": MediaStatusChoices.choices,
         "rating_choices": MEDIA_RATING_CHOICES,
         "filter_data": filter_data,
+        "is_artist_list": False,
     }
 
     # For music, show tracked artists instead of individual tracks
     # For podcasts, show tracked shows instead of individual episodes
     # This parallels TV which shows TV shows, not seasons/episodes
     if media_type == MediaTypes.PODCAST.value:
-        from django.conf import settings
-
         from app.models import Item, PodcastShowTracker
 
         show_trackers = (
@@ -965,12 +1064,30 @@ def media_list(request, media_type):
         elif rating_filter == "not_rated":
             show_trackers = show_trackers.filter(score__isnull=True)
 
+        should_annotate_first_published = (
+            release_filter != "all"
+            or sort_filter == "release_date"
+            or layout == "table"
+        )
+        if should_annotate_first_published:
+            show_trackers = show_trackers.annotate(first_published=Min("show__episodes__published"))
+
         # Apply sorting
         if sort_filter == "title":
             order = "show__title" if direction == "asc" else "-show__title"
             show_trackers = show_trackers.order_by(order)
         elif sort_filter == "score":
             order = "score" if direction == "asc" else "-score"
+            show_trackers = show_trackers.order_by(order, "show__title")
+        elif sort_filter == "release_date":
+            order = (
+                F("first_published").asc(nulls_last=True)
+                if direction == "asc"
+                else F("first_published").desc(nulls_last=True)
+            )
+            show_trackers = show_trackers.order_by(order, "show__title")
+        elif sort_filter == "date_added":
+            order = "created_at" if direction == "asc" else "-created_at"
             show_trackers = show_trackers.order_by(order, "show__title")
         elif sort_filter == "start_date":
             order = "start_date" if direction == "asc" else "-start_date"
@@ -980,6 +1097,18 @@ def media_list(request, media_type):
             show_trackers = show_trackers.order_by("-updated_at")
 
         show_trackers_list = list(show_trackers)
+
+        if release_filter != "all":
+            today = timezone.localdate()
+            show_trackers_list = [
+                tracker
+                for tracker in show_trackers_list
+                if _matches_release_filter_value(
+                    getattr(tracker, "first_published", None),
+                    release_filter,
+                    today,
+                )
+            ]
 
         def _build_podcast_filter_data(trackers):
             genres_set = set()
@@ -1049,6 +1178,7 @@ def media_list(request, media_type):
                 self.notes = tracker.notes
                 self.created_at = tracker.created_at
                 self.updated_at = tracker.updated_at
+                self.release_datetime = getattr(tracker, "first_published", None)
 
                 # Create a mock Item for compatibility with media components
                 # Use the show's podcast_uuid as media_id for routing
@@ -1090,6 +1220,7 @@ def media_list(request, media_type):
             "current_collection": collection_filter,
             "current_genre": genre_filter,
             "current_year": year_filter,
+            "current_release": release_filter,
             "current_source": source_filter,
             "current_language": language_filter,
             "current_country": country_filter,
@@ -1100,60 +1231,10 @@ def media_list(request, media_type):
             "rating_choices": MEDIA_RATING_CHOICES,
             "search_query": search_query,
             "filter_data": filter_data,
+            "is_artist_list": False,
         }
 
-        # Handle HTMX requests for partial updates
-        if request.headers.get("HX-Request"):
-            is_artist_list = context.get("is_artist_list", False)
-
-            # Changing from empty list to a status with items
-            if request.headers.get("HX-Target") == "empty_list":
-                response = HttpResponse()
-                response["HX-Redirect"] = reverse("medialist", args=[media_type])
-                return response
-
-            # Check if this is a pagination request (has page parameter and is not the first page)
-            is_pagination = request.GET.get("page") and int(request.GET.get("page", 1)) > 1
-            context["is_pagination"] = bool(is_pagination)
-
-            if layout == "grid":
-                template_name = (
-                    "app/components/artist_grid_items.html"
-                    if is_artist_list
-                    else "app/components/media_grid_items.html"
-                )
-            else:
-                template_name = (
-                    "app/components/artist_table_items.html"
-                    if is_artist_list
-                    else "app/components/media_table_items.html"
-                )
-
-            # --- Result-count update via HX-Trigger (keeps toolbar count in sync) ---
-            from django.template.loader import render_to_string
-
-            html = render_to_string(template_name, context, request=request)
-
-            media_page = context.get("media_list")
-            if media_page is not None and getattr(media_page, "paginator", None) is not None:
-                total_count = media_page.paginator.count
-            else:
-                try:
-                    total_count = len(media_page) if media_page is not None else 0
-                except TypeError:
-                    total_count = 0
-
-            response = HttpResponse(html)
-            response["HX-Trigger"] = json.dumps({"resultCountUpdated": {"count": total_count}})
-            return response
-
-        # Non-HTMX full render
-        context["is_pagination"] = False
-        return render(request, "app/media_list.html", context)
-
     if media_type == MediaTypes.MUSIC.value:
-        from django.conf import settings
-
         from app.models import Artist, ArtistTracker
         from app.services.music import get_artist_hero_image
 
@@ -1178,12 +1259,30 @@ def media_list(request, media_type):
         elif rating_filter == "not_rated":
             artist_trackers = artist_trackers.filter(score__isnull=True)
 
+        should_annotate_first_release_date = (
+            release_filter != "all"
+            or sort_filter == "release_date"
+            or layout == "table"
+        )
+        if should_annotate_first_release_date:
+            artist_trackers = artist_trackers.annotate(first_release_date=Min("artist__albums__release_date"))
+
         # Apply sorting (limited to what makes sense for artists)
         if sort_filter == "title":
             order = "artist__name" if direction == "asc" else "-artist__name"
             artist_trackers = artist_trackers.order_by(order)
         elif sort_filter == "score":
             order = "score" if direction == "asc" else "-score"
+            artist_trackers = artist_trackers.order_by(order, "artist__name")
+        elif sort_filter == "release_date":
+            order = (
+                F("first_release_date").asc(nulls_last=True)
+                if direction == "asc"
+                else F("first_release_date").desc(nulls_last=True)
+            )
+            artist_trackers = artist_trackers.order_by(order, "artist__name")
+        elif sort_filter == "date_added":
+            order = "created_at" if direction == "asc" else "-created_at"
             artist_trackers = artist_trackers.order_by(order, "artist__name")
         elif sort_filter == "start_date":
             order = "start_date" if direction == "asc" else "-start_date"
@@ -1193,6 +1292,18 @@ def media_list(request, media_type):
             artist_trackers = artist_trackers.order_by("-updated_at")
 
         artist_trackers_list = list(artist_trackers)
+
+        if release_filter != "all":
+            today = timezone.localdate()
+            artist_trackers_list = [
+                tracker
+                for tracker in artist_trackers_list
+                if _matches_release_filter_value(
+                    getattr(tracker, "first_release_date", None),
+                    release_filter,
+                    today,
+                )
+            ]
 
         def _build_music_filter_data(trackers):
             genres_set = set()
@@ -1370,6 +1481,48 @@ def media_list(request, media_type):
         context["is_artist_list"] = True
         context["filter_data"] = filter_data
 
+    table_type = "artist" if context.get("is_artist_list", False) else "media"
+    context["table_type"] = table_type
+    if layout == "table":
+        context["resolved_columns"] = resolve_columns(
+            media_type,
+            sort_filter,
+            request.user,
+            table_type,
+        )
+        context["column_config"] = resolve_column_config(
+            media_type,
+            sort_filter,
+            request.user,
+            table_type,
+        )
+        context["default_column_config"] = resolve_default_column_config(
+            media_type,
+            sort_filter,
+            table_type,
+        )
+        if settings.DEBUG:
+            prefs = (request.user.table_column_prefs or {}).get(media_type, {})
+            pref_order = prefs.get("order", []) if isinstance(prefs, dict) else []
+            pref_hidden = prefs.get("hidden", []) if isinstance(prefs, dict) else []
+            resolved_keys = [column.key for column in context["resolved_columns"]]
+            logger.info(
+                (
+                    "[COLUMN_DEBUG] media_list_resolved user=%s media_type=%s "
+                    "table_type=%s sort=%s page=%s hx=%s pref_order=%s "
+                    "pref_hidden=%s resolved_keys=%s"
+                ),
+                request.user.id,
+                media_type,
+                table_type,
+                sort_filter,
+                page,
+                bool(request.headers.get("HX-Request")),
+                pref_order,
+                pref_hidden,
+                resolved_keys,
+            )
+
     # Handle HTMX requests for partial updates
     if request.headers.get("HX-Request"):
         is_artist_list = context.get("is_artist_list", False)
@@ -1390,11 +1543,7 @@ def media_list(request, media_type):
                 else "app/components/media_grid_items.html"
             )
         else:
-            template_name = (
-                "app/components/artist_table_items.html"
-                if is_artist_list
-                else "app/components/media_table_items.html"
-            )
+            template_name = "app/components/table_items.html"
 
         from django.template.loader import render_to_string
 
@@ -1419,6 +1568,130 @@ def media_list(request, media_type):
     return render(request, template_name, context)
 
 
+@require_POST
+def update_table_columns(request, media_type):
+    """Persist table column order/visibility and trigger table refresh."""
+    if not request.user.is_authenticated:
+        return HttpResponseBadRequest("Authentication required")
+
+    table_type = request.POST.get("table_type", "media")
+    if table_type not in {"media", "artist"}:
+        table_type = "media"
+    if media_type != MediaTypes.MUSIC.value:
+        table_type = "media"
+
+    raw_order = request.POST.get("order", "[]")
+    raw_hidden = request.POST.get("hidden", "[]")
+
+    previous_prefs = (request.user.table_column_prefs or {}).get(media_type, {})
+    previous_order = previous_prefs.get("order", []) if isinstance(previous_prefs, dict) else []
+    previous_hidden = previous_prefs.get("hidden", []) if isinstance(previous_prefs, dict) else []
+
+    try:
+        parsed_order = json.loads(raw_order)
+    except json.JSONDecodeError:
+        parsed_order = []
+    try:
+        parsed_hidden = json.loads(raw_hidden)
+    except json.JSONDecodeError:
+        parsed_hidden = []
+
+    order = [value for value in parsed_order if isinstance(value, str)] if isinstance(parsed_order, list) else []
+    hidden = [value for value in parsed_hidden if isinstance(value, str)] if isinstance(parsed_hidden, list) else []
+
+    current_sort = request.POST.get("sort") or getattr(request.user, f"{media_type}_sort", MediaSortChoices.SCORE)
+    if current_sort == "time_left" and media_type != MediaTypes.TV.value:
+        current_sort = "title"
+    elif current_sort == "plays" and media_type != MediaTypes.MOVIE.value:
+        current_sort = "title"
+
+    if settings.DEBUG:
+        logger.info(
+            (
+                "[COLUMN_DEBUG] update_request user=%s media_type=%s table_type=%s "
+                "sort=%s previous_order=%s previous_hidden=%s requested_order=%s "
+                "requested_hidden=%s raw_order=%s raw_hidden=%s"
+            ),
+            request.user.id,
+            media_type,
+            table_type,
+            current_sort,
+            previous_order,
+            previous_hidden,
+            order,
+            hidden,
+            raw_order,
+            raw_hidden,
+        )
+
+    clean_order, clean_hidden = sanitize_column_prefs(
+        media_type=media_type,
+        current_sort=current_sort,
+        user=request.user,
+        table_type=table_type,
+        order=order,
+        hidden=hidden,
+    )
+
+    request.user.update_column_prefs(
+        media_type=media_type,
+        table_type=table_type,
+        order=clean_order,
+        hidden=clean_hidden,
+    )
+
+    if settings.DEBUG:
+        logger.info(
+            (
+                "[COLUMN_DEBUG] update_sanitized user=%s media_type=%s table_type=%s "
+                "sanitized_order=%s sanitized_hidden=%s"
+            ),
+            request.user.id,
+            media_type,
+            table_type,
+            clean_order,
+            clean_hidden,
+        )
+
+        poll_results = []
+        for attempt in range(1, 4):
+            request.user.refresh_from_db(fields=["table_column_prefs"])
+            polled_prefs = (request.user.table_column_prefs or {}).get(media_type, {})
+            polled_order = polled_prefs.get("order", []) if isinstance(polled_prefs, dict) else []
+            polled_hidden = polled_prefs.get("hidden", []) if isinstance(polled_prefs, dict) else []
+            resolved_keys = [
+                column.key
+                for column in resolve_columns(
+                    media_type,
+                    current_sort,
+                    request.user,
+                    table_type,
+                )
+            ]
+            poll_results.append(
+                {
+                    "attempt": attempt,
+                    "order": polled_order,
+                    "hidden": polled_hidden,
+                    "resolved": resolved_keys,
+                },
+            )
+            if attempt < 3:
+                time.sleep(0.05)
+
+        logger.info(
+            "[COLUMN_DEBUG] update_poll user=%s media_type=%s table_type=%s polls=%s",
+            request.user.id,
+            media_type,
+            table_type,
+            poll_results,
+        )
+
+    response = HttpResponse(status=204)
+    response["HX-Trigger"] = json.dumps({"refreshTableColumns": True})
+    return response
+
+
 @require_GET
 def media_search(request):
     """Return the media search page."""
@@ -1430,10 +1703,75 @@ def media_search(request):
     page = int(request.GET.get("page", 1))
     layout = request.GET.get("layout", "grid")
 
+    def _norm(text):
+        return str(text or "").strip().casefold()
+
+    def _title_fields(item_obj):
+        if isinstance(item_obj, dict):
+            return (
+                item_obj.get("title"),
+                item_obj.get("original_title"),
+                item_obj.get("localized_title"),
+            )
+        return (
+            getattr(item_obj, "title", None),
+            getattr(item_obj, "original_title", None),
+            getattr(item_obj, "localized_title", None),
+        )
+
+    def _display_title_for_user(item_obj):
+        if hasattr(item_obj, "get_display_title"):
+            return item_obj.get_display_title(user=request.user)
+
+        title, original_title, localized_title = _title_fields(item_obj)
+        title = str(title or "").strip()
+        original_title = str(original_title or "").strip() or None
+        localized_title = str(localized_title or "").strip() or None
+
+        if not localized_title and title:
+            localized_title = title
+
+        preference = getattr(request.user, "title_display_preference", "localized")
+        if preference == "original":
+            return original_title or localized_title or title
+        return localized_title or original_title or title
+
+    def _matched_title(item_obj, search_query):
+        normalized_query = _norm(search_query)
+        if not normalized_query:
+            return None
+
+        display_title = _display_title_for_user(item_obj)
+        display_norm = _norm(display_title)
+
+        title, original_title, localized_title = _title_fields(item_obj)
+        candidates = []
+        for candidate in (title, localized_title, original_title):
+            text = str(candidate or "").strip()
+            if text and text not in candidates:
+                candidates.append(text)
+
+        # Prefer exact, then prefix, then contains.
+        for predicate in (
+            lambda value: _norm(value) == normalized_query,
+            lambda value: _norm(value).startswith(normalized_query),
+            lambda value: normalized_query in _norm(value),
+        ):
+            for candidate in candidates:
+                if _norm(candidate) == display_norm:
+                    continue
+                if predicate(candidate):
+                    return candidate
+        return None
+
     local_results = []
     local_results_total = 0
     local_results_limit = 24
     local_results_kind = "media"
+    local_music_artists = []
+    local_music_artists_total = 0
+    local_music_albums = []
+    local_music_albums_total = 0
     if request.user.is_authenticated and query and page == 1:
         try:
             if media_type == MediaTypes.PODCAST.value:
@@ -1480,9 +1818,18 @@ def media_search(request):
                             self.item.save(update_fields=["title", "image"])
 
                 adapted_media = [PodcastShowAdapter(tracker) for tracker in show_trackers]
-                local_results = [{"item": media.item, "media": media} for media in adapted_media]
+                local_results = [
+                    {
+                        "item": media.item,
+                        "media": media,
+                        "matched_title": _matched_title(media.item, query),
+                    }
+                    for media in adapted_media
+                ]
             elif media_type == MediaTypes.MUSIC.value:
-                from app.models import ArtistTracker
+                from django.db.models import Q
+
+                from app.models import AlbumTracker, ArtistTracker
 
                 artist_trackers = (
                     ArtistTracker.objects.filter(user=request.user)
@@ -1491,9 +1838,24 @@ def media_search(request):
                     .filter(artist__name__icontains=query)
                     .select_related("artist")
                 )
-                local_results_total = artist_trackers.count()
-                local_results = list(artist_trackers.order_by("artist__name")[:local_results_limit])
-                local_results_kind = "artists"
+                local_music_artists_total = artist_trackers.count()
+                local_music_artists = list(artist_trackers.order_by("artist__name")[:local_results_limit])
+
+                album_trackers = (
+                    AlbumTracker.objects.filter(user=request.user)
+                    .exclude(album__title__isnull=True)
+                    .exclude(album__title__exact="")
+                    .filter(
+                        Q(album__title__icontains=query)
+                        | Q(album__artist__name__icontains=query),
+                    )
+                    .select_related("album", "album__artist")
+                )
+                local_music_albums_total = album_trackers.count()
+                local_music_albums = list(album_trackers.order_by("album__title")[:local_results_limit])
+
+                local_results_total = local_music_artists_total + local_music_albums_total
+                local_results_kind = "music"
             else:
                 local_queryset = BasicMedia.objects.get_media_list(
                     request.user,
@@ -1506,7 +1868,14 @@ def media_search(request):
                 local_results_total = local_queryset.count()
                 local_media = list(local_queryset[:local_results_limit])
                 BasicMedia.objects.annotate_max_progress(local_media, media_type)
-                local_results = [{"item": media.item, "media": media} for media in local_media]
+                local_results = [
+                    {
+                        "item": media.item,
+                        "media": media,
+                        "matched_title": _matched_title(media.item, query),
+                    }
+                    for media in local_media
+                ]
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Local search failed for %s: %s", query, exc)
 
@@ -1516,22 +1885,15 @@ def media_search(request):
         config.get_default_source_name(media_type).value,
     )
 
-    data = services.search(media_type, query, page, source)
+    search_page = 1 if media_type == MediaTypes.MUSIC.value else page
+    data = services.search(media_type, query, search_page, source)
 
-    # Handle music's combined search format
     if media_type == MediaTypes.MUSIC.value:
-        # Music returns {artists: [], releases: [], tracks: {...}}
-        track_data = data.get("tracks", {})
-        if track_data.get("results"):
-            track_data["results"] = helpers.enrich_items_with_user_data(
-                request, track_data["results"],
-            )
-
         context = {
             "user": request.user,
-            "data": track_data,  # Track results for pagination
-            "music_artists": data.get("artists", []),
-            "music_releases": data.get("releases", []),
+            "data": data,
+            "music_online_artists": data.get("artists", []),
+            "music_online_releases": data.get("releases", []),
             "source": source,
             "media_type": media_type,
             "layout": layout,
@@ -1539,12 +1901,18 @@ def media_search(request):
             "local_results_total": local_results_total,
             "local_results_limit": local_results_limit,
             "local_results_kind": local_results_kind,
+            "local_music_artists": local_music_artists,
+            "local_music_artists_total": local_music_artists_total,
+            "local_music_albums": local_music_albums,
+            "local_music_albums_total": local_music_albums_total,
         }
-        return render(request, "app/search_music.html", context)
+        return render(request, "app/search.html", context)
 
     # Enrich search results with user tracking data
     if data.get("results"):
         data["results"] = helpers.enrich_items_with_user_data(request, data["results"])
+        for result in data["results"]:
+            result["matched_title"] = _matched_title(result.get("item"), query)
 
     context = {
         "user": request.user,
@@ -1986,6 +2354,13 @@ def media_details(
                             self.id = podcasts[0].id if podcasts else 0
                             self._podcasts = podcasts
                             self._history_list = history_list
+                            in_progress_entry = next(
+                                (entry for entry in podcasts if not entry.end_date),
+                                None,
+                            )
+                            self.in_progress_instance_id = (
+                                in_progress_entry.id if in_progress_entry else None
+                            )
 
                         @property
                         def completed_play_count(self):
@@ -1993,6 +2368,10 @@ def media_details(
                             # Since we already filtered all_history to only include records with end_date,
                             # we can just count the length of the filtered history_list
                             return len(self._history_list)
+
+                        @property
+                        def has_in_progress_entry(self):
+                            return bool(self.in_progress_instance_id)
 
                         @property
                         def history(self):
@@ -2108,6 +2487,45 @@ def media_details(
 
     media_metadata = services.get_media_metadata(media_type, media_id, source)
 
+    detail_item = Item.objects.filter(
+        media_id=media_id,
+        source=source,
+        media_type=media_type,
+    ).first()
+
+    # When the user prefers original titles, aggressively refresh stale TMDB cache
+    # if we don't yet have an original title. This lets details-page opens backfill
+    # better title variants that can then propagate across the UI.
+    should_refresh_tmdb_titles = (
+        request.user.is_authenticated
+        and source == Sources.TMDB.value
+        and media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value)
+        and getattr(request.user, "title_display_preference", "localized") == "original"
+        and isinstance(media_metadata, dict)
+        and not media_metadata.get("original_title")
+    )
+    if should_refresh_tmdb_titles:
+        cache.delete(f"{Sources.TMDB.value}_{media_type}_{media_id}")
+        media_metadata = services.get_media_metadata(media_type, media_id, source)
+
+    if detail_item and isinstance(media_metadata, dict):
+        title_fields = Item.title_fields_from_metadata(
+            media_metadata,
+            fallback_title=detail_item.title,
+        )
+        update_fields = []
+        if not detail_item.original_title and title_fields["original_title"]:
+            detail_item.original_title = title_fields["original_title"]
+            update_fields.append("original_title")
+        if not detail_item.localized_title and title_fields["localized_title"]:
+            detail_item.localized_title = title_fields["localized_title"]
+            update_fields.append("localized_title")
+        if not detail_item.title and title_fields["title"]:
+            detail_item.title = title_fields["title"]
+            update_fields.append("title")
+        if update_fields:
+            detail_item.save(update_fields=update_fields)
+
     # Persist series info for books if available
     if media_type == MediaTypes.BOOK.value and isinstance(media_metadata, dict):
         try:
@@ -2145,12 +2563,6 @@ def media_details(
         and media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value)
         and isinstance(media_metadata, dict)
     ):
-        from app.models import Item
-        detail_item = Item.objects.filter(
-            media_id=media_id,
-            source=source,
-            media_type=media_type,
-        ).first()
         if detail_item:
             missing_people = not detail_item.person_credits.exists()
             missing_studios = not detail_item.studio_credits.exists()
@@ -2345,14 +2757,15 @@ def media_details(
                     notes_entry = entry
                     break
 
-    # Get collection entry for this item (if not public view and not podcast)
+    # Get collection entries for this item (if not public view and not podcast)
     collection_entry = None
+    collection_entries = []
     collection_stats = None
     fetching_collection_data = False
     item_id_for_polling = None
     
     if not public_view and media_type != MediaTypes.PODCAST.value:
-        from app.helpers import is_item_collected, get_tv_show_collection_stats
+        from app.helpers import get_item_collection_entries, get_tv_show_collection_stats
         
         try:
             item = Item.objects.get(
@@ -2360,7 +2773,8 @@ def media_details(
                 source=source,
                 media_type=media_type,
             )
-            collection_entry = is_item_collected(request.user, item)
+            collection_entries = list(get_item_collection_entries(request.user, item))
+            collection_entry = collection_entries[0] if collection_entries else None
             
             # For TV shows, also get collection statistics (episodes/seasons)
             if media_type in (MediaTypes.TV.value, MediaTypes.ANIME.value):
@@ -2382,6 +2796,8 @@ def media_details(
         except Item.DoesNotExist:
             pass
 
+    has_collection_data = bool(collection_entries) or collection_entry is not None
+
     context = {
         "user": request.user,
         "media": media_metadata,
@@ -2394,7 +2810,9 @@ def media_details(
         "play_stats": play_stats,
         "notes_entry": notes_entry,
         "collection_entry": collection_entry,
+        "collection_entries": collection_entries,
         "collection_stats": collection_stats,
+        "has_collection_data": has_collection_data,
         "fetching_collection_data": fetching_collection_data if not public_view else False,
         "item_id_for_polling": item_id_for_polling if not public_view else None,
     }
@@ -2696,14 +3114,19 @@ def season_details(
         episode_item_ids = list(episode_items.values_list('id', flat=True))
         collection_entries = {}
         if episode_item_ids:
-            collection_entries_qs = CollectionEntry.objects.filter(
-                user=request.user,
-                item_id__in=episode_item_ids,
+            collection_entries_qs = (
+                CollectionEntry.objects.filter(
+                    user=request.user,
+                    item_id__in=episode_item_ids,
+                )
+                .select_related("item")
+                .order_by("-collected_at", "-id")
             )
             # Map by (season_number, episode_number) for quick lookup
             for entry in collection_entries_qs:
-                if entry.item.episode_number is not None:
-                    collection_entries[entry.item.episode_number] = entry
+                episode_number = entry.item.episode_number
+                if episode_number is not None and episode_number not in collection_entries:
+                    collection_entries[episode_number] = entry
         
         # Add collection_entry to each episode
         for episode in season_metadata["episodes"]:
@@ -2725,11 +3148,12 @@ def season_details(
 
     # Get collection entry, stats, and metadata for this season (if not public view)
     collection_entry = None
+    collection_entries = []
     season_collection_stats = None
     fetching_collection_data = False
     item_id_for_polling = None
     if not public_view:
-        from app.helpers import is_item_collected, get_season_collection_stats, get_season_collection_metadata
+        from app.helpers import get_item_collection_entries, get_season_collection_stats, get_season_collection_metadata
         from app.models import Item as ItemModel  # Use alias to avoid any potential shadowing
         
         # Get the season item
@@ -2749,7 +3173,7 @@ def season_details(
                     source=source,
                     media_type__in=(MediaTypes.TV.value, MediaTypes.ANIME.value),
                 )
-                show_collection_entry = is_item_collected(request.user, show_item)
+                show_collection_entry = get_item_collection_entries(request.user, show_item).first()
                 
                 logger.info("Season page: Checking show %s (item_id=%s) - collection entry exists: %s", 
                            show_item.title, show_item.id, show_collection_entry is not None)
@@ -2779,7 +3203,8 @@ def season_details(
                 logger.error("Error checking show collection entry in season_details: %s", exc, exc_info=True)
             
             # Get collection entry for the season item itself (if it exists)
-            season_collection_entry = is_item_collected(request.user, season_item)
+            collection_entries = list(get_item_collection_entries(request.user, season_item))
+            season_collection_entry = collection_entries[0] if collection_entries else None
             
             # Get aggregated collection metadata from episodes (or season/show-level entry)
             season_collection_metadata = get_season_collection_metadata(request.user, season_item)
@@ -2819,6 +3244,8 @@ def season_details(
         except ItemModel.DoesNotExist:
             pass
 
+    has_collection_data = bool(collection_entries) or collection_entry is not None
+
     context = {
         "user": request.user,
         "media": season_metadata,
@@ -2828,7 +3255,9 @@ def season_details(
         "current_instance": current_instance,
         "public_view": public_view,
         "collection_entry": collection_entry,
+        "collection_entries": collection_entries,
         "collection_stats": season_collection_stats,  # For season, this is episode stats
+        "has_collection_data": has_collection_data,
         "fetching_collection_data": fetching_collection_data if not public_view else False,
         "item_id_for_polling": item_id_for_polling if not public_view else None,
     }
@@ -3021,7 +3450,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             media_type=media_type,
             season_number=season_number,
             defaults={
-                "title": metadata["title"],
+                **Item.title_fields_from_metadata(metadata),
                 "image": metadata["image"],
                 "number_of_pages": number_of_pages,
             },
@@ -3072,7 +3501,10 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
                 episode_number = episode_data["episode_number"]
                 if episode_number in existing_episodes:
                     episode_item = existing_episodes[episode_number]
-                    episode_item.title = metadata["title"]
+                    title_fields = Item.title_fields_from_metadata(metadata)
+                    episode_item.title = title_fields["title"]
+                    episode_item.original_title = title_fields["original_title"]
+                    episode_item.localized_title = title_fields["localized_title"]
                     episode_item.image = episode_data["image"]
                     
                     # Extract and update release_datetime from TMDB air_date
@@ -3090,7 +3522,6 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
                     # Extract and update runtime_minutes from raw episode data
                     raw_episode = raw_episode_map.get(episode_number)
                     if raw_episode and raw_episode.get("runtime") is not None:
-                        from app.statistics import parse_runtime_to_minutes
                         # Raw episode runtime is an integer (minutes) from TMDB
                         runtime_minutes = int(raw_episode["runtime"])
                         if runtime_minutes > 0:
@@ -3108,7 +3539,14 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             if episodes_to_update:
                 updated_count = Item.objects.bulk_update(
                     episodes_to_update,
-                    ["title", "image", "release_datetime", "runtime_minutes"],
+                    [
+                        "title",
+                        "original_title",
+                        "localized_title",
+                        "image",
+                        "release_datetime",
+                        "runtime_minutes",
+                    ],
                     batch_size=100,
                 )
                 logger.info(
@@ -3512,6 +3950,13 @@ def track_modal(
                         self.id = podcasts[0].id if podcasts else 0
                         self._podcasts = podcasts
                         self._history_list = history_list
+                        in_progress_entry = next(
+                            (entry for entry in podcasts if not entry.end_date),
+                            None,
+                        )
+                        self.in_progress_instance_id = (
+                            in_progress_entry.id if in_progress_entry else None
+                        )
 
                     @property
                     def completed_play_count(self):
@@ -3519,6 +3964,10 @@ def track_modal(
                         # Since we already filtered all_history to only include records with end_date,
                         # we can just count the length of the filtered history_list
                         return len(self._history_list)
+
+                    @property
+                    def has_in_progress_entry(self):
+                        return bool(self.in_progress_instance_id)
 
                     @property
                     def history(self):
@@ -3691,6 +4140,23 @@ def track_modal(
     return response
 
 
+def _parse_release_date_str(release_date_value):
+    """Parse provider release dates into a date object for Album.release_date."""
+    if not release_date_value:
+        return None
+
+    if isinstance(release_date_value, date):
+        return release_date_value
+
+    if hasattr(release_date_value, "date"):
+        return release_date_value.date()
+
+    if isinstance(release_date_value, str):
+        return parse_date(release_date_value[:10])
+
+    return None
+
+
 @require_POST
 def media_save(request):
     """Save or update media data to the database."""
@@ -3736,7 +4202,7 @@ def media_save(request):
                     media_type=media_type,
                     season_number=season_number,
                     defaults={
-                        "title": metadata["title"],
+                        **Item.title_fields_from_metadata(metadata),
                         "image": metadata["image"],
                         "number_of_pages": number_of_pages,
                     },
@@ -3797,6 +4263,7 @@ def media_save(request):
         if metadata.get("details", {}).get("runtime"):
             from app.statistics import parse_runtime_to_minutes
             runtime_minutes = parse_runtime_to_minutes(metadata["details"]["runtime"])
+        release_datetime = helpers.extract_release_datetime(metadata)
 
         # Extract number_of_pages for books
         number_of_pages = None
@@ -3808,22 +4275,87 @@ def media_save(request):
         if media_type == MediaTypes.GAME.value:
             metadata_genres = stats._coerce_genre_list(metadata.get("genres"))
 
+        # Extract all metadata fields from details
+        details = metadata.get("details", {})
+
+        country = details.get("country", "")
+        languages = details.get("languages", [])
+        if not isinstance(languages, list):
+            languages = [languages] if languages else []
+
+        platforms = details.get("platforms", [])
+        if not isinstance(platforms, list):
+            platforms = [platforms] if platforms else []
+
+        format_type = details.get("format", "")
+        status = details.get("status", "")
+
+        studios = details.get("studios", [])
+        if not isinstance(studios, list):
+            studios = [studios] if studios else []
+
+        themes = details.get("themes", [])
+        if not isinstance(themes, list):
+            themes = [themes] if themes else []
+
+        authors = details.get("authors", []) or details.get("author", [])
+        if isinstance(authors, str):
+            authors = [authors]
+        elif not isinstance(authors, list):
+            authors = []
+
+        publishers = details.get("publishers", "") or details.get("publisher", "")
+        if isinstance(publishers, list):
+            publishers = publishers[0] if publishers else ""
+
+        isbn = details.get("isbn", [])
+        if not isinstance(isbn, list):
+            isbn = []
+
+        source_material = details.get("source", "")
+
+        creators = details.get("people", [])
+        if not isinstance(creators, list):
+            creators = []
+        runtime = details.get("runtime") or ""
+
         item, created = Item.objects.get_or_create(
             media_id=media_id,
             source=source,
             media_type=media_type,
             season_number=season_number,
             defaults={
-                "title": metadata["title"],
+                **Item.title_fields_from_metadata(metadata),
                 "image": metadata["image"],
                 "runtime_minutes": runtime_minutes,
                 "number_of_pages": number_of_pages,
+                "release_datetime": release_datetime,
                 "genres": metadata_genres,
+                # Add all new metadata fields
+                "country": country,
+                "languages": languages,
+                "platforms": platforms,
+                "format": format_type,
+                "status": status,
+                "studios": studios,
+                "themes": themes,
+                "authors": authors,
+                "publishers": publishers,
+                "isbn": isbn,
+                "source_material": source_material,
+                "creators": creators,
+                "runtime": runtime,
+                "metadata_fetched_at": timezone.now(),
             },
         )
 
         # Update image, runtime, and number_of_pages if they're not set and we have them now
         needs_save = False
+
+        # Always update metadata_fetched_at timestamp
+        if not created:
+            item.metadata_fetched_at = timezone.now()
+            needs_save = True
         if item.image == settings.IMG_NONE and metadata.get("image"):
             item.image = metadata["image"]
             needs_save = True
@@ -3833,9 +4365,61 @@ def media_save(request):
         if not item.number_of_pages and number_of_pages:
             item.number_of_pages = number_of_pages
             needs_save = True
+        if not item.release_datetime and release_datetime:
+            item.release_datetime = release_datetime
+            needs_save = True
         if metadata_genres and metadata_genres != item.genres:
             item.genres = metadata_genres
             needs_save = True
+
+        # Update metadata fields if they're not set and we have them now
+        if not item.country and country:
+            item.country = country
+            needs_save = True
+        if not item.languages and languages:
+            item.languages = languages
+            needs_save = True
+        if not item.platforms and platforms:
+            item.platforms = platforms
+            needs_save = True
+        if not item.format and format_type:
+            item.format = format_type
+            needs_save = True
+        if not item.status and status:
+            item.status = status
+            needs_save = True
+        if not item.studios and studios:
+            item.studios = studios
+            needs_save = True
+        if not item.themes and themes:
+            item.themes = themes
+            needs_save = True
+        if not item.authors and authors:
+            item.authors = authors
+            needs_save = True
+        if not item.publishers and publishers:
+            item.publishers = publishers
+            needs_save = True
+        if not item.isbn and isbn:
+            item.isbn = isbn
+            needs_save = True
+        if not item.source_material and source_material:
+            item.source_material = source_material
+            needs_save = True
+        if not item.creators and creators:
+            item.creators = creators
+            needs_save = True
+        if not item.runtime and runtime:
+            item.runtime = runtime
+            needs_save = True
+        title_fields = Item.title_fields_from_metadata(metadata)
+        if not item.original_title and title_fields["original_title"]:
+            item.original_title = title_fields["original_title"]
+            needs_save = True
+        if not item.localized_title and title_fields["localized_title"]:
+            item.localized_title = title_fields["localized_title"]
+            needs_save = True
+
         if needs_save:
             item.save()
 
@@ -4003,7 +4587,7 @@ def episode_save(request):
             media_type=MediaTypes.SEASON.value,
             season_number=season_number,
             defaults={
-                "title": tv_with_seasons_metadata["title"],
+                **Item.title_fields_from_metadata(tv_with_seasons_metadata),
                 "image": season_image,
             },
         )
@@ -5801,7 +6385,6 @@ def album_detail(request, album_id):
     total_duration_ms = 0
     
     # Get collection entries for all tracks in one query (if user is authenticated)
-    from app.helpers import is_item_collected
     from app.models import CollectionEntry
     
     collection_entries_by_item_id = {}
@@ -5813,8 +6396,9 @@ def album_detail(request, album_id):
             collection_entries = CollectionEntry.objects.filter(
                 user=request.user,
                 item_id__in=music_item_ids,
-            )
-            collection_entries_by_item_id = {ce.item_id: ce for ce in collection_entries}
+            ).order_by("-collected_at", "-id")
+            for collection_entry in collection_entries:
+                collection_entries_by_item_id.setdefault(collection_entry.item_id, collection_entry)
     
     for track in all_tracks:
         # Look up user's Music entry for this track
@@ -6277,6 +6861,7 @@ def podcast_episodes_api(request, show_id):
                         self.item = item
                         self.id = podcast.id
                         self._history_list = history_list
+                        self.in_progress_instance_id = podcast.id if not podcast.end_date else None
 
                     @property
                     def completed_play_count(self):
@@ -6284,6 +6869,10 @@ def podcast_episodes_api(request, show_id):
                         # Since we already filtered all_history to only include records with end_date,
                         # we can just count the length of the filtered history_list
                         return len(self._history_list)
+
+                    @property
+                    def has_in_progress_entry(self):
+                        return bool(self.in_progress_instance_id)
 
                     @property
                     def history(self):
@@ -6962,17 +7551,29 @@ def podcast_save(request):
                     self.item = item
                     self.id = podcast.id
                     self._history_list = history_list
+                    self.in_progress_instance_id = podcast.id if not podcast.end_date else None
+
+                @property
+                def completed_play_count(self):
+                    return len(self._history_list)
 
                 @property
                 def history(self):
                     class HistoryProxy:
                         def __init__(self, history_list):
                             self._history = history_list
+
                         def all(self):
                             return self._history
+
                         def count(self):
                             return len(self._history)
+
                     return HistoryProxy(self._history_list)
+
+                @property
+                def has_in_progress_entry(self):
+                    return bool(self.in_progress_instance_id)
 
             podcast_wrapper = PodcastHistoryWrapper(user_podcast, item, all_history)
         else:
@@ -7235,6 +7836,9 @@ def statistics(request):
         top_rated_by_type = statistics_data.get("top_rated_by_type", {})
         top_rated_movie = top_rated_by_type.get("movie", [])
         top_rated_tv = top_rated_by_type.get("tv", [])
+        top_rated_book = top_rated_by_type.get("book", [])
+        top_rated_comic = top_rated_by_type.get("comic", [])
+        top_rated_manga = top_rated_by_type.get("manga", [])
 
         # Format dates as strings for URL parameters
         start_date_str_for_url = start_date_str if start_date_str else ""
@@ -7254,6 +7858,9 @@ def statistics(request):
             "top_rated": statistics_data["top_rated"],
             "top_rated_movie": top_rated_movie,
             "top_rated_tv": top_rated_tv,
+            "top_rated_book": top_rated_book,
+            "top_rated_comic": top_rated_comic,
+            "top_rated_manga": top_rated_manga,
             "top_played": statistics_data["top_played"],
             "top_talent": statistics_data.get("top_talent", {}),
             "status_distribution": statistics_data["status_distribution"],
@@ -7264,6 +7871,9 @@ def statistics(request):
             "music_consumption": statistics_data["music_consumption"],
             "podcast_consumption": statistics_data["podcast_consumption"],
             "game_consumption": statistics_data["game_consumption"],
+            "book_consumption": statistics_data.get("book_consumption", {}),
+            "comic_consumption": statistics_data.get("comic_consumption", {}),
+            "manga_consumption": statistics_data.get("manga_consumption", {}),
             "daily_hours_by_media_type": statistics_data["daily_hours_by_media_type"],
             "history_highlights": statistics_data.get("history_highlights", {}),
             "show_year_charts": show_year_charts,
@@ -7311,6 +7921,9 @@ def statistics(request):
             "music_consumption": {},
             "podcast_consumption": {},
             "game_consumption": {},
+            "book_consumption": {},
+            "comic_consumption": {},
+            "manga_consumption": {},
             "daily_hours_by_media_type": {},
             "history_highlights": {},
         }
@@ -7324,6 +7937,11 @@ def statistics(request):
             "media_type_distribution": empty_statistics_data["media_type_distribution"],
             "score_distribution": empty_statistics_data["score_distribution"],
             "top_rated": empty_statistics_data["top_rated"],
+            "top_rated_movie": [],
+            "top_rated_tv": [],
+            "top_rated_book": [],
+            "top_rated_comic": [],
+            "top_rated_manga": [],
             "top_played": empty_statistics_data["top_played"],
             "top_talent": empty_statistics_data["top_talent"],
             "status_distribution": empty_statistics_data["status_distribution"],
@@ -7334,6 +7952,9 @@ def statistics(request):
             "music_consumption": empty_statistics_data["music_consumption"],
             "podcast_consumption": empty_statistics_data["podcast_consumption"],
             "game_consumption": empty_statistics_data["game_consumption"],
+            "book_consumption": empty_statistics_data["book_consumption"],
+            "comic_consumption": empty_statistics_data["comic_consumption"],
+            "manga_consumption": empty_statistics_data["manga_consumption"],
             "daily_hours_by_media_type": empty_statistics_data["daily_hours_by_media_type"],
             "history_highlights": empty_statistics_data["history_highlights"],
             "media_type_colors": empty_statistics_data["media_type_colors"],
@@ -7593,6 +8214,9 @@ def service_worker(request):
     with sw_path.open(encoding="utf-8") as sw_file:
         response = HttpResponse(sw_file.read(), content_type="application/javascript")
     response["Service-Worker-Allowed"] = "/"
+    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response["Pragma"] = "no-cache"
+    response["Expires"] = "0"
     return response
 
 
@@ -8062,15 +8686,27 @@ def collection_list(request, media_type=None):
     )
 
 
+def _collection_redirect(request):
+    """Redirect to a safe next URL when present, otherwise collection list."""
+    next_url = request.GET.get("next") or request.POST.get("next")
+    if next_url and url_has_allowed_host_and_scheme(
+        url=next_url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return redirect(next_url)
+    return redirect("collection_list")
+
+
 @require_POST
 def collection_add(request):
-    """Add item to collection (with optional metadata)."""
+    """Add a new owned copy to collection (with optional metadata)."""
     item_id = request.POST.get("item_id")
     if not item_id:
         if request.headers.get("HX-Request"):
             return HttpResponseBadRequest("Item ID is required")
         messages.error(request, "Item ID is required")
-        return redirect("collection_list")
+        return _collection_redirect(request)
 
     try:
         item = Item.objects.get(id=item_id)
@@ -8078,46 +8714,48 @@ def collection_add(request):
         if request.headers.get("HX-Request"):
             return HttpResponseBadRequest("Item not found")
         messages.error(request, "Item not found")
-        return redirect("collection_list")
+        return _collection_redirect(request)
 
-    # Check if entry already exists
-    existing_entry = helpers.is_item_collected(request.user, item)
-    
     # Create mutable POST data and add item
     post_data = request.POST.copy()
     post_data["item"] = item.id
-    
-    if existing_entry:
-        # Update instead of creating duplicate
-        form = CollectionEntryForm(
-            post_data,
-            instance=existing_entry,
-            user=request.user,
-            collection_media_type=item.media_type,
-        )
-    else:
-        form = CollectionEntryForm(
-            post_data,
-            user=request.user,
-            collection_media_type=item.media_type,
-        )
+
+    form = CollectionEntryForm(
+        post_data,
+        user=request.user,
+        collection_media_type=item.media_type,
+    )
 
     if form.is_valid():
         entry = form.save(commit=False)
         entry.user = request.user
         entry.item = item
         entry.save()
+
+        # Collection-only games do not appear in the games media list.
+        # Ensure newly collected untracked games get a tracker row in Planning.
+        if item.media_type == MediaTypes.GAME.value:
+            game_exists = Game.objects.filter(user=request.user, item=item).exists()
+            if not game_exists:
+                Game.objects.create(
+                    user=request.user,
+                    item=item,
+                    status=Status.PLANNING.value,
+                    progress=0,
+                )
+
         collected_at = form.cleaned_data.get("collected_at")
         if collected_at:
             CollectionEntry.objects.filter(id=entry.id).update(collected_at=collected_at)
             entry.collected_at = collected_at
         messages.success(request, f"Added {item.title} to collection")
+        if request.headers.get("HX-Request"):
+            return JsonResponse({"success": True, "message": f"Added {item.title} to collection"})
     else:
         helpers.form_error_messages(form, request)
-
-    if request.headers.get("HX-Request"):
-        return JsonResponse({"success": True, "message": f"Added {item.title} to collection"})
-    return redirect("collection_list")
+        if request.headers.get("HX-Request"):
+            return JsonResponse({"success": False, "errors": form.errors}, status=400)
+    return _collection_redirect(request)
 
 
 @require_POST
@@ -8142,12 +8780,13 @@ def collection_update(request, entry_id):
             CollectionEntry.objects.filter(id=entry.id).update(collected_at=collected_at)
             entry.collected_at = collected_at
         messages.success(request, f"Updated collection entry for {entry.item.title}")
+        if request.headers.get("HX-Request"):
+            return JsonResponse({"success": True, "message": f"Updated collection entry"})
     else:
         helpers.form_error_messages(form, request)
-
-    if request.headers.get("HX-Request"):
-        return JsonResponse({"success": True, "message": f"Updated collection entry"})
-    return redirect("collection_list")
+        if request.headers.get("HX-Request"):
+            return JsonResponse({"success": False, "errors": form.errors}, status=400)
+    return _collection_redirect(request)
 
 
 @require_POST
@@ -8165,13 +8804,13 @@ def collection_remove(request, entry_id):
 
     if request.headers.get("HX-Request"):
         return JsonResponse({"success": True, "message": f"Removed {item_title} from collection"})
-    return redirect("collection_list")
+    return _collection_redirect(request)
 
 
 @never_cache
 @require_GET
 def collection_modal(request, source, media_type, media_id):
-    """Return modal HTML for adding/editing collection entry."""
+    """Return modal HTML for adding and managing collection entries."""
     def _parse_optional_int(value):
         if value in (None, "", "null"):
             return None
@@ -8223,16 +8862,16 @@ def collection_modal(request, source, media_type, media_id):
 
     if not item:
         item_defaults = {
-            "title": "",
+            **Item.title_fields_from_metadata(metadata or {}),
             "image": settings.IMG_NONE,
         }
         try:
-            item_defaults["title"] = (
-                (metadata or {}).get("title")
-                or (metadata or {}).get("season_title")
-                or (metadata or {}).get("name")
-                or ""
-            )
+            if not item_defaults.get("title"):
+                item_defaults["title"] = (
+                    (metadata or {}).get("season_title")
+                    or (metadata or {}).get("name")
+                    or ""
+                )
             item_defaults["image"] = (metadata or {}).get("image") or settings.IMG_NONE
 
             if media_type == MediaTypes.BOOK.value:
@@ -8261,9 +8900,9 @@ def collection_modal(request, source, media_type, media_id):
         if platforms:
             platform_choices = platforms
 
-    existing_entry = helpers.is_item_collected(request.user, item)
+    existing_entries = helpers.get_item_collection_entries(request.user, item)
+    existing_entry = existing_entries.first()
     form = CollectionEntryForm(
-        instance=existing_entry,
         user=request.user,
         collection_media_type=item.media_type,
         collection_choices_override={"resolution": platform_choices} if platform_choices else None,
@@ -8279,6 +8918,7 @@ def collection_modal(request, source, media_type, media_id):
         {
             "item": item,
             "entry": existing_entry,
+            "existing_entries": existing_entries,
             "form": form,
             "return_url": return_url,
             "collection_fields": collection_fields,

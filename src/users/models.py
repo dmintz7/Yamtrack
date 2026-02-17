@@ -38,6 +38,9 @@ class MediaSortChoices(models.TextChoices):
     SCORE = "score", "Rating"
     TITLE = "title", "Title"
     PROGRESS = "progress", "Progress"
+    PLAYS = "plays", "Plays"
+    RELEASE_DATE = "release_date", "Release Date"
+    DATE_ADDED = "date_added", "Date Added"
     START_DATE = "start_date", "Start Date"
     END_DATE = "end_date", "End Date"
     TIME_LEFT = "time_left", "Time Left"
@@ -176,6 +179,14 @@ class MediaCardSubtitleDisplayChoices(models.TextChoices):
 
     HOVER = "hover", "On hover"
     ALWAYS = "always", "Always visible"
+
+
+class TitleDisplayPreferenceChoices(models.TextChoices):
+    """Choices for how item titles are displayed across the app."""
+
+    LOCALIZED = "localized", "Show Localized Titles"
+    ORIGINAL = "original", "Show Original Titles"
+    AUTO = "auto", "Auto (if available)"
 
 
 class PlannedHomeDisplayChoices(models.TextChoices):
@@ -500,6 +511,12 @@ class User(AbstractUser):
         choices=MediaCardSubtitleDisplayChoices.choices,
         help_text="Control when media card subtitles are visible",
     )
+    title_display_preference = models.CharField(
+        max_length=20,
+        default=TitleDisplayPreferenceChoices.LOCALIZED,
+        choices=TitleDisplayPreferenceChoices.choices,
+        help_text="Preferred title variant to display in the UI",
+    )
 
     # Tracking settings
     quick_watch_date = models.CharField(
@@ -690,6 +707,11 @@ class User(AbstractUser):
         blank=True,
         help_text="Auto-pause rules with per-library week thresholds",
     )
+    table_column_prefs = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Per-library table column order and hidden keys",
+    )
     book_comic_manga_progress_percentage = models.BooleanField(
         default=False,
         help_text="Track book, comic, and manga progress as percentage instead of pages/issues/chapters",
@@ -829,6 +851,10 @@ class User(AbstractUser):
                 condition=models.Q(media_card_subtitle_display__in=MediaCardSubtitleDisplayChoices.values),
             ),
             models.CheckConstraint(
+                name="title_display_preference_valid",
+                condition=models.Q(title_display_preference__in=TitleDisplayPreferenceChoices.values),
+            ),
+            models.CheckConstraint(
                 name="statistics_default_range_valid",
                 condition=models.Q(statistics_default_range__in=StatisticsRangeChoices.values),
             ),
@@ -952,6 +978,29 @@ class User(AbstractUser):
             self.save(update_fields=[field_name])
 
         return new_value
+
+    def update_column_prefs(self, media_type, table_type, order, hidden):
+        """Persist sanitized table prefs where order/hidden represent flexible columns."""
+        prefs = dict(self.table_column_prefs or {})
+        existing = prefs.get(media_type, {})
+
+        # Preserve shape compatibility with future table-type scoped prefs.
+        if isinstance(existing, dict) and ("order" in existing or "hidden" in existing):
+            media_prefs = dict(existing)
+            media_prefs["order"] = list(order)
+            media_prefs["hidden"] = list(hidden)
+            prefs[media_type] = media_prefs
+        else:
+            prefs[media_type] = {
+                "order": list(order),
+                "hidden": list(hidden),
+            }
+
+        if prefs != self.table_column_prefs:
+            self.table_column_prefs = prefs
+            self.save(update_fields=["table_column_prefs"])
+
+        return prefs[media_type]
 
     @property
     def rating_scale_max(self):
@@ -1197,6 +1246,58 @@ class User(AbstractUser):
                         "next_run": next_run,
                         "schedule": f"Every {interval_minutes} minutes",
                         "mode": "Only New Items",
+                    },
+                )
+
+        return {
+            "results": results,
+            "schedules": schedules,
+        }
+
+    def get_export_tasks(self):
+        """Return export backup task history and schedules for the user."""
+        export_task_name = "Scheduled backup export"
+
+        # Get task results for this user
+        task_result_filter_text = f"'user_id': {self.id},"
+        task_results = TaskResult.objects.filter(
+            task_kwargs__contains=task_result_filter_text,
+            task_name=export_task_name,
+        ).order_by("-date_done")
+
+        results = []
+        for task in task_results:
+            processed_task = helpers.process_task_result(task)
+            results.append(
+                {
+                    "task": processed_task,
+                    "date": task.date_done,
+                    "status": task.status,
+                    "summary": processed_task.summary,
+                    "errors": processed_task.errors,
+                },
+            )
+
+        # Get periodic export schedules
+        periodic_tasks_filter_text = f'"user_id": {self.id}'
+        periodic_tasks = PeriodicTask.objects.filter(
+            task=export_task_name,
+            kwargs__contains=periodic_tasks_filter_text,
+            enabled=True,
+        ).select_related("crontab")
+
+        schedules = []
+        for periodic_task in periodic_tasks:
+            schedule_info = helpers.get_export_next_run_info(periodic_task)
+            if schedule_info:
+                schedules.append(
+                    {
+                        "task": periodic_task,
+                        "last_run": periodic_task.last_run_at,
+                        "next_run": schedule_info["next_run"],
+                        "schedule": schedule_info["frequency"],
+                        "media_types": schedule_info["media_types"],
+                        "include_lists": schedule_info["include_lists"],
                     },
                 )
 

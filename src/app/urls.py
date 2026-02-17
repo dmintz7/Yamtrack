@@ -9,6 +9,11 @@ register_converter(converters.SourceChecker, "source")
 urlpatterns = [
     path("", views.home, name="home"),
     path("medialist/<media_type:media_type>", views.media_list, name="medialist"),
+    path(
+        "medialist/<media_type:media_type>/columns/",
+        views.update_table_columns,
+        name="medialist_columns",
+    ),
     path("search", views.media_search, name="search"),
     path(
         "details/<source:source>/tv/<str:media_id>/<str:title>/season/<int:season_number>",
@@ -92,6 +97,11 @@ urlpatterns = [
         "person/<source:source>/<str:person_id>/<slug:name>",
         views.person_detail,
         name="person_detail",
+    ),
+    path(
+        "api/active-playback/",
+        views.active_playback_fragment,
+        name="active_playback_fragment",
     ),
     path("api/cache-status/", views.cache_status, name="cache_status"),
     path("serviceworker.js", views.service_worker, name="service_worker"),

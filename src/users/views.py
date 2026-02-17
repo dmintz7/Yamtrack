@@ -9,6 +9,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
 from django.db import IntegrityError
 from django.db.models import Q
+from django.http import StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.defaultfilters import pluralize
 from django.utils import timezone
@@ -18,6 +19,7 @@ from django_celery_beat.models import PeriodicTask
 from app import history_cache, statistics_cache
 from app.models import Item, MediaTypes, Status
 from app.templatetags import app_tags
+from integrations import exports
 from integrations import plex
 from integrations.models import PlexAccount
 from users.forms import NotificationSettingsForm, PasswordChangeForm, UserUpdateForm
@@ -30,6 +32,7 @@ from users.models import (
     PlannedHomeDisplayChoices,
     QuickWatchDateChoices,
     RatingScaleChoices,
+    TitleDisplayPreferenceChoices,
     TopTalentSortChoices,
     TimeFormatChoices,
 )
@@ -351,6 +354,7 @@ def ui_preferences(request):
 @require_http_methods(["GET", "POST"])
 def preferences(request):
     """Render the preferences settings page."""
+    media_types = [mt.value for mt in MediaTypes if mt.value != MediaTypes.EPISODE.value]
     active_libraries = [
         library
         for library in request.user.get_active_media_types()
@@ -367,12 +371,14 @@ def preferences(request):
             return redirect("preferences")
 
         # Process form submission for user preferences
+        selected_media_types = request.POST.getlist("media_types_checkboxes")
         date_format = request.POST.get("date_format")
         time_format = request.POST.get("time_format")
         activity_history_view = request.POST.get("activity_history_view")
         game_logging_style = request.POST.get("game_logging_style")
         mobile_grid_layout = request.POST.get("mobile_grid_layout")
         media_card_subtitle_display = request.POST.get("media_card_subtitle_display")
+        title_display_preference = request.POST.get("title_display_preference")
         top_talent_sort_by = request.POST.get("top_talent_sort_by")
         rating_scale = request.POST.get("rating_scale")
         quick_season_update_mobile = request.POST.get("quick_season_update_mobile") == "1"
@@ -381,6 +387,17 @@ def preferences(request):
         fields_to_update = []
         rating_scale_changed = False
         top_talent_sort_changed = False
+
+        # Backwards-compatible handling for older clients/tests that still submit
+        # media library checkboxes to the preferences endpoint.
+        if "media_types_checkboxes" in request.POST:
+            for media_type in media_types:
+                enabled_field = f"{media_type}_enabled"
+                is_enabled = media_type in selected_media_types
+                current_value = getattr(request.user, enabled_field, False)
+                if current_value != is_enabled:
+                    setattr(request.user, enabled_field, is_enabled)
+                    fields_to_update.append(enabled_field)
 
         if date_format and date_format in [choice[0] for choice in DateFormatChoices.choices]:
             if request.user.date_format != date_format:
@@ -426,6 +443,15 @@ def preferences(request):
             if request.user.media_card_subtitle_display != media_card_subtitle_display:
                 request.user.media_card_subtitle_display = media_card_subtitle_display
                 fields_to_update.append("media_card_subtitle_display")
+
+        if (
+            title_display_preference
+            and title_display_preference
+            in [choice[0] for choice in TitleDisplayPreferenceChoices.choices]
+        ):
+            if request.user.title_display_preference != title_display_preference:
+                request.user.title_display_preference = title_display_preference
+                fields_to_update.append("title_display_preference")
 
         if (
             top_talent_sort_by
@@ -484,10 +510,16 @@ def preferences(request):
                     request.user.id,
                     debounce_seconds=0,
                 )
-        messages.success(request, "Preferences updated successfully.")
+        success_message = (
+            "Settings updated successfully."
+            if "media_types_checkboxes" in request.POST
+            else "Preferences updated successfully."
+        )
+        messages.success(request, success_message)
         return redirect("preferences")
 
     context = {
+        "media_types": media_types,
         "active_libraries": active_libraries,
         "auto_pause_enabled": request.user.auto_pause_in_progress_enabled,
         "auto_pause_rules_json": json.dumps(request.user.auto_pause_rules or []),
@@ -597,7 +629,15 @@ def import_data(request):
 @require_GET
 def export_data(request):
     """Render the export data settings page."""
-    return render(request, "users/export_data.html", {"user": request.user})
+    media_types = [mt.value for mt in MediaTypes if mt.value not in (MediaTypes.EPISODE.value, MediaTypes.SEASON.value)]
+    export_tasks = request.user.get_export_tasks()
+    context = {
+        "user": request.user,
+        "media_types": media_types,
+        "export_tasks": export_tasks,
+        "backup_dir": settings.BACKUP_DIR,
+    }
+    return render(request, "users/export_data.html", context)
 
 
 @require_GET
@@ -634,6 +674,114 @@ def delete_import_schedule(request):
     except PeriodicTask.DoesNotExist:
         messages.error(request, "Import schedule not found.")
     return redirect("import_data")
+
+
+@require_POST
+def create_export_schedule(request):
+    """Create a one-time export or a recurring scheduled export."""
+    import datetime as dt
+
+    from django_celery_beat.models import CrontabSchedule
+
+    if request.user.is_demo:
+        messages.error(request, "This section is view-only for demo accounts.")
+        return redirect("export_data")
+
+    frequency = request.POST.get("frequency", "once")
+    export_time = request.POST.get("time", "03:00")
+    selected_media_types = request.POST.getlist("media_types") or request.POST.getlist("media_types_checkboxes")
+    include_lists = request.POST.get("include_lists") == "on"
+
+    media_types = selected_media_types if selected_media_types else None
+
+    def build_export_response():
+        now = timezone.localtime()
+        return StreamingHttpResponse(
+            streaming_content=exports.generate_rows(
+                request.user,
+                media_types=media_types,
+                include_lists=include_lists,
+            ),
+            content_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="yamtrack_{now}.csv"'},
+        )
+
+    if frequency == "once":
+        logger.info("User %s started one-time CSV export", request.user.username)
+        return build_export_response()
+
+    try:
+        parsed_time = dt.datetime.strptime(export_time, "%H:%M").time()
+    except ValueError:
+        messages.error(request, "Invalid export time.")
+        return redirect("export_data")
+
+    # Check for existing schedule
+    existing = PeriodicTask.objects.filter(
+        task="Scheduled backup export",
+        kwargs__contains=f'"user_id": {request.user.id}',
+        enabled=True,
+    ).first()
+    if existing:
+        messages.error(request, "A backup schedule already exists. Delete it first to create a new one.")
+        return redirect("export_data")
+
+    if frequency == "daily":
+        day_of_week = "*"
+    elif frequency == "2days":
+        day_of_week = "*/2"
+    elif frequency == "weekly":
+        day_of_week = "0"  # Sunday
+    else:
+        messages.error(request, "Invalid export frequency.")
+        return redirect("export_data")
+
+    crontab, _ = CrontabSchedule.objects.get_or_create(
+        hour=parsed_time.hour,
+        minute=parsed_time.minute,
+        day_of_week=day_of_week,
+        timezone=timezone.get_default_timezone(),
+    )
+
+    task_kwargs = {
+        "user_id": request.user.id,
+        "include_lists": include_lists,
+    }
+    if selected_media_types:
+        task_kwargs["media_types"] = selected_media_types
+
+    task_name = f"Backup export for {request.user.username} at {parsed_time} {frequency}"
+    PeriodicTask.objects.create(
+        name=task_name,
+        task="Scheduled backup export",
+        crontab=crontab,
+        kwargs=json.dumps(task_kwargs),
+        start_time=timezone.now(),
+        enabled=True,
+    )
+
+    logger.info(
+        "User %s created recurring export schedule (%s) and started CSV export",
+        request.user.username,
+        frequency,
+    )
+    return build_export_response()
+
+
+@require_POST
+def delete_export_schedule(request):
+    """Delete a scheduled backup export."""
+    task_name = request.POST.get("task_name")
+    try:
+        task = PeriodicTask.objects.get(
+            name=task_name,
+            kwargs__contains=f'"user_id": {request.user.id}',
+        )
+        task.delete()
+        messages.success(request, "Backup schedule deleted.")
+    except PeriodicTask.DoesNotExist:
+        messages.error(request, "Backup schedule not found.")
+    return redirect("export_data")
 
 
 @require_POST

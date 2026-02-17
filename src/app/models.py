@@ -97,6 +97,8 @@ class Item(CalendarTriggerMixin, models.Model):
         default=MediaTypes.MOVIE.value,
     )
     title = models.TextField()
+    original_title = models.TextField(null=True, blank=True)
+    localized_title = models.TextField(null=True, blank=True)
     image = models.URLField()  # if add default, custom media entry will show the value
     season_number = models.PositiveIntegerField(null=True, blank=True)
     episode_number = models.PositiveIntegerField(null=True, blank=True)
@@ -104,6 +106,21 @@ class Item(CalendarTriggerMixin, models.Model):
     number_of_pages = models.PositiveIntegerField(null=True, blank=True, help_text="Number of pages for books")
     release_datetime = models.DateTimeField(null=True, blank=True)
     genres = models.JSONField(default=list, blank=True)
+    # Metadata fields for filtering, sorting, and statistics
+    country = models.CharField(max_length=255, blank=True, default="", help_text="Origin country")
+    languages = models.JSONField(default=list, blank=True, help_text="Array of languages")
+    platforms = models.JSONField(default=list, blank=True, help_text="Array of platforms (Games)")
+    format = models.CharField(max_length=100, blank=True, default="", help_text="Media format type")
+    status = models.CharField(max_length=100, blank=True, default="", help_text="Production status")
+    studios = models.JSONField(default=list, blank=True, help_text="Array of production studios")
+    themes = models.JSONField(default=list, blank=True, help_text="Array of themes (Games)")
+    authors = models.JSONField(default=list, blank=True, help_text="Array of authors")
+    publishers = models.CharField(max_length=255, blank=True, default="", help_text="Publisher name")
+    isbn = models.JSONField(default=list, blank=True, help_text="Array of ISBN numbers")
+    source_material = models.CharField(max_length=100, blank=True, default="", help_text="Source material (Anime)")
+    creators = models.JSONField(default=list, blank=True, help_text="Array of creators (Comics)")
+    runtime = models.CharField(max_length=50, blank=True, default="", help_text="Formatted runtime string")
+    metadata_fetched_at = models.DateTimeField(null=True, blank=True, help_text="When metadata was last fetched")
     series_name = models.TextField(null=True, blank=True)
     series_position = models.FloatField(null=True, blank=True)
 
@@ -192,6 +209,83 @@ class Item(CalendarTriggerMixin, models.Model):
                 name += f"E{self.episode_number}"
         return name
 
+    @staticmethod
+    def _normalize_title_value(value):
+        """Normalize title values to non-empty strings or None."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @classmethod
+    def title_fields_from_metadata(cls, metadata, fallback_title=""):
+        """Build item title fields from provider metadata."""
+        metadata = metadata or {}
+        title = cls._normalize_title_value(metadata.get("title"))
+        original_title = cls._normalize_title_value(metadata.get("original_title"))
+        localized_title = cls._normalize_title_value(metadata.get("localized_title"))
+
+        if not localized_title and title:
+            localized_title = title
+
+        if not title:
+            title = (
+                localized_title
+                or original_title
+                or cls._normalize_title_value(fallback_title)
+                or ""
+            )
+
+        return {
+            "title": title,
+            "original_title": original_title,
+            "localized_title": localized_title,
+        }
+
+    def get_display_and_alternative_title(self, user=None):
+        """Return display and alternate titles based on user preference."""
+        preference = getattr(user, "title_display_preference", "localized")
+        return self.resolve_title_preference(preference)
+
+    def resolve_title_preference(self, preference):
+        """Resolve display and alternative titles for a preference value."""
+        preference = (preference or "localized").lower()
+        original_title = self._normalize_title_value(self.original_title)
+        localized_title = (
+            self._normalize_title_value(self.localized_title)
+            or self._normalize_title_value(self.title)
+        )
+        fallback_title = (
+            self._normalize_title_value(self.title)
+            or localized_title
+            or original_title
+            or ""
+        )
+
+        if preference == "original":
+            display_title = original_title or localized_title or fallback_title
+            alternative_title = (
+                localized_title if localized_title and localized_title != display_title else None
+            )
+            return display_title, alternative_title
+
+        # Auto currently prefers localized titles when available.
+        display_title = localized_title or original_title or fallback_title
+        alternative_title = (
+            original_title if original_title and original_title != display_title else None
+        )
+        return display_title, alternative_title
+
+    def get_display_title(self, user=None):
+        """Return the preferred title to render for this item."""
+        display_title, _ = self.get_display_and_alternative_title(user=user)
+        return display_title
+
+    def get_alternative_title(self, user=None):
+        """Return the opposite title variant for tooltip display."""
+        _, alternative_title = self.get_display_and_alternative_title(user=user)
+        return alternative_title
+
     @classmethod
     def generate_manual_id(cls, media_type):
         """Generate a new ID for manual items."""
@@ -208,6 +302,26 @@ class Item(CalendarTriggerMixin, models.Model):
             return "1"
 
         return str(int(latest_item.media_id) + 1)
+
+    def save(self, *args, **kwargs):
+        """Save the item, ensuring JSONField arrays are never None."""
+        # Ensure all JSONField arrays are lists, never None
+        json_array_fields = [
+            "genres",
+            "languages",
+            "platforms",
+            "studios",
+            "themes",
+            "authors",
+            "isbn",
+            "creators",
+        ]
+        for field_name in json_array_fields:
+            value = getattr(self, field_name, None)
+            if value is None:
+                setattr(self, field_name, [])
+
+        super().save(*args, **kwargs)
 
     def fetch_releases(self, delay):
         """Fetch releases for the item."""
@@ -240,7 +354,7 @@ class Item(CalendarTriggerMixin, models.Model):
                     media_id=self.media_id,
                     source=self.source,
                     media_type=MediaTypes.TV.value,
-                    title=tv_metadata["title"],
+                    **Item.title_fields_from_metadata(tv_metadata),
                     image=tv_metadata["image"],
                     runtime_minutes=runtime_minutes,
                 )
@@ -263,6 +377,7 @@ class MetadataBackfillField(models.TextChoices):
     RUNTIME = "runtime", "Runtime"
     GENRES = "genres", "Genres"
     CREDITS = "credits", "Credits"
+    RELEASE = "release", "Release Date"
 
 
 CREDITS_BACKFILL_VERSION = 2
@@ -541,14 +656,23 @@ class MediaManager(models.Manager):
         queryset = queryset.select_related("item")
         queryset = self._apply_prefetch_related(queryset, media_type)
 
-        # Aggregate data from duplicate entries FIRST
-        queryset = self._aggregate_duplicate_data(queryset, user, media_type)
+        requires_presort_aggregation = (
+            sort_filter in ("progress", "plays")
+            and media_type not in (MediaTypes.TV.value, MediaTypes.SEASON.value)
+        )
+
+        # Generic progress sorting uses Python and reads aggregated_progress, so
+        # duplicates must be aggregated before sorting in that specific path.
+        if requires_presort_aggregation:
+            queryset = self._aggregate_duplicate_data(queryset, user, media_type)
 
         # Apply sorting AFTER aggregation
         if sort_filter:
             queryset = self._sort_media_list(queryset, sort_filter, media_type, direction)
 
-        return queryset
+        # Re-apply duplicate aggregation because SQL queryset operations in sorting
+        # can materialize fresh model instances and drop dynamic aggregated attrs.
+        return self._aggregate_duplicate_data(queryset, user, media_type)
 
     def _aggregate_duplicate_data(self, queryset, user, media_type):
         """Aggregate data from duplicate entries for each item."""
@@ -578,8 +702,18 @@ class MediaManager(models.Manager):
         # Sort by created_at to get chronological order
         sorted_entries = sorted(all_media_entries, key=lambda x: x.created_at)
 
-        # Aggregate progress (sum all progress values)
-        total_progress = sum(entry.progress for entry in all_media_entries)
+        # Aggregate progress:
+        # - Movies: count completed entries as plays (legacy rows may have progress=0)
+        # - Other media: sum raw progress values
+        if getattr(display_media.item, "media_type", None) == MediaTypes.MOVIE.value:
+            completed_entries = [
+                entry
+                for entry in all_media_entries
+                if entry.end_date or entry.status == Status.COMPLETED.value
+            ]
+            total_progress = len(completed_entries)
+        else:
+            total_progress = sum(entry.progress for entry in all_media_entries)
         display_media.aggregated_progress = total_progress
 
         # Aggregate start date (earliest start date)
@@ -784,7 +918,7 @@ class MediaManager(models.Manager):
     def _sort_generic_media_list(self, queryset, sort_filter, direction):
         """Apply generic sorting logic for all media types."""
         # Handle progress sorting specially to use aggregated progress
-        if sort_filter == "progress":
+        if sort_filter in ("progress", "plays"):
             # Since we're now sorting after aggregation, we can use the aggregated_progress attribute
             # Convert to list for Python-based sorting since aggregated_progress is a Python attribute
             media_list = list(queryset)
@@ -795,11 +929,20 @@ class MediaManager(models.Manager):
             )
 
         # Handle sorting by date fields with special null handling
-        if sort_filter in ("start_date", "end_date"):
+        if sort_filter in ("start_date", "end_date", "date_added"):
+            sort_field = "created_at" if sort_filter == "date_added" else sort_filter
             order = (
-                models.F(sort_filter).asc(nulls_last=True)
+                models.F(sort_field).asc(nulls_last=True)
                 if direction == "asc"
-                else models.F(sort_filter).desc(nulls_last=True)
+                else models.F(sort_field).desc(nulls_last=True)
+            )
+            return queryset.order_by(order, models.functions.Lower("item__title"))
+
+        if sort_filter == "release_date":
+            order = (
+                models.F("item__release_datetime").asc(nulls_last=True)
+                if direction == "asc"
+                else models.F("item__release_datetime").desc(nulls_last=True)
             )
             return queryset.order_by(order, models.functions.Lower("item__title"))
 
@@ -2075,7 +2218,10 @@ class TV(Media):
                 media_type=MediaTypes.SEASON.value,
                 season_number=season_number,
                 defaults={
-                    "title": self.item.title,
+                    **Item.title_fields_from_metadata(
+                        season_metadata,
+                        fallback_title=self.item.title,
+                    ),
                     "image": season_image,
                 },
             )
@@ -2163,7 +2309,10 @@ class TV(Media):
                         media_type=MediaTypes.SEASON.value,
                         season_number=season_data["season_number"],
                         defaults={
-                            "title": self.item.title,
+                            **Item.title_fields_from_metadata(
+                                season_data,
+                                fallback_title=self.item.title,
+                            ),
                             "image": season_image,
                         },
                     )
@@ -2275,16 +2424,8 @@ class Season(Media):
         have been watched at least that many times. Otherwise uses max episode number
         to ignore errant repeats.
         """
-        episodes = self.episodes.all()
-        if not episodes:
-            return 0
-
-        # Calculate repeat counts for each episode number
-        episode_counts = {}
-        for ep in episodes:
-            ep_num = ep.item.episode_number
-            episode_counts[ep_num] = episode_counts.get(ep_num, 0) + 1
-
+        stats = self._get_episode_stats()
+        episode_counts = stats["episode_counts"]
         if not episode_counts:
             return 0
 
@@ -2292,11 +2433,10 @@ class Season(Media):
             # Check for systematic rewatching: only consider it a rewatch if ALL episodes
             # up to that point have been watched at least that many times.
             # This prevents errant repeats (single episode watched twice) from skewing progress.
-            
             sorted_episode_nums = sorted(episode_counts.keys())
             max_rewatch_level = 0
             max_rewatch_progress = 0
-            
+
             # Check each possible rewatch level (2, 3, ...)
             # Level 1 is just normal watching, so we start at 2
             for rewatch_level in range(2, max(episode_counts.values()) + 1):
@@ -2308,18 +2448,51 @@ class Season(Media):
                     else:
                         # Can't be a consistent rewatch beyond this point
                         break
-                
+
                 if consistent_up_to > max_rewatch_progress:
                     max_rewatch_level = rewatch_level
                     max_rewatch_progress = consistent_up_to
-            
+
             # If we found a consistent rewatch pattern, use it
             if max_rewatch_level > 1 and max_rewatch_progress > 0:
                 return max_rewatch_progress
-        
+
         # Otherwise, use the maximum episode number watched (at least once)
         # This handles normal watching and errant repeats
-        return max(episode_counts.keys())
+        return stats["max_episode_number"]
+
+    @property
+    def completed_episode_count(self):
+        """Return the number of unique episodes with a completed play."""
+        stats = self._get_episode_stats()
+        return len(stats["completed_episode_numbers"])
+
+    def _get_episode_stats(self):
+        """Return cached episode stats for this season."""
+        cached = getattr(self, "_episode_stats_cache", None)
+        if cached is not None:
+            return cached
+
+        episodes = list(self.episodes.all())
+        episode_counts = {}
+        completed_episode_numbers = set()
+        max_episode_number = 0
+
+        for ep in episodes:
+            ep_num = ep.item.episode_number
+            episode_counts[ep_num] = episode_counts.get(ep_num, 0) + 1
+            if ep_num and ep_num > max_episode_number:
+                max_episode_number = ep_num
+            if ep.end_date is not None:
+                completed_episode_numbers.add(ep_num)
+
+        cached = {
+            "episode_counts": episode_counts,
+            "completed_episode_numbers": completed_episode_numbers,
+            "max_episode_number": max_episode_number,
+        }
+        self._episode_stats_cache = cached
+        return cached
 
     @property
     def progressed_at(self):
@@ -2529,7 +2702,7 @@ class Season(Media):
                 source=self.item.source,
                 media_type=MediaTypes.TV.value,
                 defaults={
-                    "title": tv_metadata["title"],
+                    **Item.title_fields_from_metadata(tv_metadata),
                     "image": tv_metadata["image"],
                 },
             )
@@ -2640,7 +2813,7 @@ class Season(Media):
             season_number=self.item.season_number,
             episode_number=episode_number,
             defaults={
-                "title": self.item.title,
+                **Item.title_fields_from_metadata({"title": self.item.title}),
                 "image": image,
                 "runtime_minutes": runtime_minutes,
                 "release_datetime": release_datetime,
@@ -3391,7 +3564,7 @@ class PodcastShowTracker(models.Model):
 
 
 class CollectionEntry(models.Model):
-    """Model to store user's collected media items with optional A/V metadata."""
+    """Model to store user-owned copies of media items with optional A/V metadata."""
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     item = models.ForeignKey(Item, on_delete=models.CASCADE)
@@ -3416,7 +3589,7 @@ class CollectionEntry(models.Model):
 
     # Video metadata
     resolution = models.CharField(
-        max_length=20,
+        max_length=100,
         blank=True,
         default="",
         help_text="Resolution: 720p, 1080p, 4k, etc.",
@@ -3472,12 +3645,6 @@ class CollectionEntry(models.Model):
     )
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["user", "item"],
-                name="unique_user_collection_item",
-            ),
-        ]
         ordering = ["-collected_at"]
         indexes = [
             models.Index(fields=["user", "-collected_at"]),

@@ -61,11 +61,11 @@ class Migration(migrations.Migration):
             },
             bases=(simple_history.models.HistoricalChanges, models.Model),
         ),
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name='item',
             name='app_item_media_type_valid',
         ),
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name='item',
             name='app_item_source_valid',
         ),
@@ -79,11 +79,11 @@ class Migration(migrations.Migration):
             name='source',
             field=models.CharField(choices=[('tmdb', 'The Movie Database'), ('mal', 'MyAnimeList'), ('mangaupdates', 'MangaUpdates'), ('igdb', 'Internet Game Database'), ('openlibrary', 'Open Library'), ('hardcover', 'Hardcover'), ('comicvine', 'Comic Vine'), ('bgg', 'BoardGameGeek'), ('musicbrainz', 'MusicBrainz'), ('pocketcasts', 'Pocket Casts'), ('manual', 'Manual')], max_length=20),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name='item',
             constraint=models.CheckConstraint(condition=models.Q(('source__in', ['tmdb', 'mal', 'mangaupdates', 'igdb', 'openlibrary', 'hardcover', 'comicvine', 'bgg', 'musicbrainz', 'pocketcasts', 'manual'])), name='app_item_source_valid'),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name='item',
             constraint=models.CheckConstraint(condition=models.Q(('media_type__in', ['tv', 'season', 'episode', 'movie', 'anime', 'manga', 'game', 'book', 'comic', 'boardgame', 'music', 'podcast'])), name='app_item_media_type_valid'),
         ),

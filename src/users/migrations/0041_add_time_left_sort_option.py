@@ -3,6 +3,39 @@
 from django.db import migrations, models
 
 
+def _constraint_exists(schema_editor, table_name, constraint_name):
+    """Return True when a database constraint already exists."""
+    connection = schema_editor.connection
+    if connection.vendor != "postgresql":
+        return False
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM pg_constraint WHERE conname = %s",
+            [constraint_name],
+        )
+        return cursor.fetchone() is not None
+
+
+class AddConstraintIfNotExists(migrations.AddConstraint):
+    """Add a constraint only when it doesn't already exist."""
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        to_model = to_state.apps.get_model(app_label, self.model_name)
+        if _constraint_exists(schema_editor, to_model._meta.db_table, self.constraint.name):
+            return
+        super().database_forwards(app_label, schema_editor, from_state, to_state)
+
+
+class RemoveConstraintIfExists(migrations.RemoveConstraint):
+    """Remove a constraint only when it exists."""
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        from_model = from_state.apps.get_model(app_label, self.model_name)
+        if not _constraint_exists(schema_editor, from_model._meta.db_table, self.name):
+            return
+        super().database_forwards(app_label, schema_editor, from_state, to_state)
+
+
 def drop_home_sort_constraint_if_exists(apps, schema_editor):
     if schema_editor.connection.vendor != "postgresql":
         return
@@ -19,7 +52,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name="user",
             name="home_sort_valid",
         ),
@@ -27,27 +60,27 @@ class Migration(migrations.Migration):
             model_name="user",
             name="tv_sort_valid",
         ),
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name="user",
             name="season_sort_valid",
         ),
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name="user",
             name="movie_sort_valid",
         ),
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name="user",
             name="anime_sort_valid",
         ),
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name="user",
             name="manga_sort_valid",
         ),
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name="user",
             name="game_sort_valid",
         ),
-        migrations.RemoveConstraint(
+        RemoveConstraintIfExists(
             model_name="user",
             name="book_sort_valid",
         ),
@@ -198,7 +231,7 @@ class Migration(migrations.Migration):
             drop_home_sort_constraint_if_exists,
             migrations.RunPython.noop,
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(
@@ -210,7 +243,7 @@ class Migration(migrations.Migration):
                 name="home_sort_valid",
             ),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(
@@ -229,7 +262,7 @@ class Migration(migrations.Migration):
                 name="tv_sort_valid",
             ),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(
@@ -248,7 +281,7 @@ class Migration(migrations.Migration):
                 name="season_sort_valid",
             ),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(
@@ -267,7 +300,7 @@ class Migration(migrations.Migration):
                 name="movie_sort_valid",
             ),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(
@@ -286,7 +319,7 @@ class Migration(migrations.Migration):
                 name="anime_sort_valid",
             ),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(
@@ -305,7 +338,7 @@ class Migration(migrations.Migration):
                 name="manga_sort_valid",
             ),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(
@@ -324,7 +357,7 @@ class Migration(migrations.Migration):
                 name="game_sort_valid",
             ),
         ),
-        migrations.AddConstraint(
+        AddConstraintIfNotExists(
             model_name="user",
             constraint=models.CheckConstraint(
                 condition=models.Q(
