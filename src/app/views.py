@@ -2110,22 +2110,23 @@ def media_details(
 
     # Persist series info for books if available
     if media_type == MediaTypes.BOOK.value and isinstance(media_metadata, dict):
+        from app.models import Item
         try:
-            item = Item.objects.get(
+            item_obj = Item.objects.get(
                 media_id=media_id,
                 source=source,
                 media_type=media_type,
             )
             update_fields = []
-            if media_metadata.get("series_name") and item.series_name != media_metadata["series_name"]:
-                item.series_name = media_metadata["series_name"]
+            if media_metadata.get("series_name") and item_obj.series_name != media_metadata["series_name"]:
+                item_obj.series_name = media_metadata["series_name"]
                 update_fields.append("series_name")
-            if media_metadata.get("series_position") is not None and item.series_position != media_metadata["series_position"]:
-                item.series_position = media_metadata["series_position"]
+            if media_metadata.get("series_position") is not None and item_obj.series_position != media_metadata["series_position"]:
+                item_obj.series_position = media_metadata["series_position"]
                 update_fields.append("series_position")
-            
+
             if update_fields:
-                item.save(update_fields=update_fields)
+                item_obj.save(update_fields=update_fields)
         except Item.DoesNotExist:
             pass
 
@@ -2353,20 +2354,20 @@ def media_details(
     
     if not public_view and media_type != MediaTypes.PODCAST.value:
         from app.helpers import is_item_collected, get_tv_show_collection_stats
-        
+        from app.models import Item
         try:
-            item = Item.objects.get(
+            item_obj = Item.objects.get(
                 media_id=media_id,
                 source=source,
                 media_type=media_type,
             )
-            collection_entry = is_item_collected(request.user, item)
+            collection_entry = is_item_collected(request.user, item_obj)
             
             # For TV shows, also get collection statistics (episodes/seasons)
             if media_type in (MediaTypes.TV.value, MediaTypes.ANIME.value):
                 # Use episode count from metadata if available to match Details pane
                 metadata_episode_count = media_metadata.get("details", {}).get("episodes") or media_metadata.get("episodes")
-                collection_stats = get_tv_show_collection_stats(request.user, item, metadata_episode_count=metadata_episode_count)
+                collection_stats = get_tv_show_collection_stats(request.user, item_obj, metadata_episode_count=metadata_episode_count)
             
             # If no collection entry exists and auto-fetch is supported, trigger background fetch
             if not collection_entry and config.supports_collection_auto_fetch(media_type):
@@ -2374,11 +2375,11 @@ def media_details(
                 if plex_account and plex_account.plex_token:
                     from integrations.tasks import fetch_collection_metadata_for_item
                     # Trigger background task to fetch collection data
-                    fetch_collection_metadata_for_item.delay(user_id=request.user.id, item_id=item.id)
+                    fetch_collection_metadata_for_item.delay(user_id=request.user.id, item_id=item_obj.id)
                     # Use module-level logger directly to avoid UnboundLocalError
-                    logging.getLogger(__name__).info("Triggered background collection fetch for %s - %s (item_id=%s)", request.user.username, item.title, item.id)
+                    logging.getLogger(__name__).info("Triggered background collection fetch for %s - %s (item_id=%s)", request.user.username, item_obj.title, item_obj.id)
                     fetching_collection_data = True
-                    item_id_for_polling = item.id
+                    item_id_for_polling = item_obj.id
         except Item.DoesNotExist:
             pass
 
@@ -8073,7 +8074,7 @@ def collection_add(request):
         return redirect("collection_list")
 
     try:
-        item = Item.objects.get(id=item_id)
+        item_obj = Item.objects.get(id=item_id)
     except Item.DoesNotExist:
         if request.headers.get("HX-Request"):
             return HttpResponseBadRequest("Item not found")
@@ -8081,11 +8082,11 @@ def collection_add(request):
         return redirect("collection_list")
 
     # Check if entry already exists
-    existing_entry = helpers.is_item_collected(request.user, item)
+    existing_entry = helpers.is_item_collected(request.user, item_obj)
     
     # Create mutable POST data and add item
     post_data = request.POST.copy()
-    post_data["item"] = item.id
+    post_data["item"] = item_obj.id
     
     if existing_entry:
         # Update instead of creating duplicate
@@ -8093,30 +8094,30 @@ def collection_add(request):
             post_data,
             instance=existing_entry,
             user=request.user,
-            collection_media_type=item.media_type,
+            collection_media_type=item_obj.media_type,
         )
     else:
         form = CollectionEntryForm(
             post_data,
             user=request.user,
-            collection_media_type=item.media_type,
+            collection_media_type=item_obj.media_type,
         )
 
     if form.is_valid():
         entry = form.save(commit=False)
         entry.user = request.user
-        entry.item = item
+        entry.item = item_obj
         entry.save()
         collected_at = form.cleaned_data.get("collected_at")
         if collected_at:
             CollectionEntry.objects.filter(id=entry.id).update(collected_at=collected_at)
             entry.collected_at = collected_at
-        messages.success(request, f"Added {item.title} to collection")
+        messages.success(request, f"Added {item_obj.title} to collection")
     else:
         helpers.form_error_messages(form, request)
 
     if request.headers.get("HX-Request"):
-        return JsonResponse({"success": True, "message": f"Added {item.title} to collection"})
+        return JsonResponse({"success": True, "message": f"Added {item_obj.title} to collection"})
     return redirect("collection_list")
 
 
@@ -8302,8 +8303,8 @@ def collection_status_api(request, item_id):
     from app.helpers import is_item_collected
     
     try:
-        item = Item.objects.get(id=item_id)
-        collection_entry = is_item_collected(request.user, item)
+        item_obj = Item.objects.get(id=item_id)
+        collection_entry = is_item_collected(request.user, item_obj)
         
         return JsonResponse({
             "has_collection_data": collection_entry is not None,
