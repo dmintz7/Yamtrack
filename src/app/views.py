@@ -74,8 +74,9 @@ from app.models import (
     Status,
     Track,
 )
-from app.providers import manual, services, tmdb
+from app.providers import manual, services, get_tv_provider, tmdb
 from app.services import music as sync_services
+from app.statistics import _parse_release_date_str
 from app.templatetags import app_tags
 from lists.models import CustomList
 from users.models import HomeSortChoices, MediaSortChoices, MediaStatusChoices
@@ -1964,6 +1965,7 @@ def media_details(
     if public_list_view:
         try:
             # Get or create the Item for this media
+            from app.models import Item
             item, _ = Item.objects.get_or_create(
                 media_id=media_id,
                 source=source,
@@ -2235,6 +2237,7 @@ def media_details(
             episode_items_data = []
             episode_items_map = {}  # Map media_id to Item object
             initial_limit = 20
+            from app.models import Item
             for episode in episodes[:initial_limit]:
                 item, _ = Item.objects.get_or_create(
                     media_id=episode.episode_uuid,
@@ -2773,6 +2776,7 @@ def media_details(
     # Enrich related items with user tracking data
     # For public views, use list owner's data if available
     if media_metadata.get("related"):
+        media_metadata["related"].pop("episodes", None) # Remove episodes to avoid errors
         for section_name, related_items in media_metadata["related"].items():
             if related_items:
                 media_metadata["related"][section_name] = (
@@ -2812,7 +2816,7 @@ def media_details(
         from app.helpers import get_item_collection_entries, get_tv_show_collection_stats
         
         try:
-            item = Item.objects.get(
+            item_obj = Item.objects.get(
                 media_id=media_id,
                 source=source,
                 media_type=media_type,
@@ -2824,7 +2828,7 @@ def media_details(
             if media_type in (MediaTypes.TV.value, MediaTypes.ANIME.value):
                 # Use episode count from metadata if available to match Details pane
                 metadata_episode_count = media_metadata.get("details", {}).get("episodes") or media_metadata.get("episodes")
-                collection_stats = get_tv_show_collection_stats(request.user, item, metadata_episode_count=metadata_episode_count)
+                collection_stats = get_tv_show_collection_stats(request.user, item_obj, metadata_episode_count=metadata_episode_count)
             
             # If no collection entry exists and auto-fetch is supported, trigger background fetch
             if not collection_entry and config.supports_collection_auto_fetch(media_type):
@@ -2832,11 +2836,11 @@ def media_details(
                 if plex_account and plex_account.plex_token:
                     from integrations.tasks import fetch_collection_metadata_for_item
                     # Trigger background task to fetch collection data
-                    fetch_collection_metadata_for_item.delay(user_id=request.user.id, item_id=item.id)
+                    fetch_collection_metadata_for_item.delay(user_id=request.user.id, item_id=item_obj.id)
                     # Use module-level logger directly to avoid UnboundLocalError
-                    logging.getLogger(__name__).info("Triggered background collection fetch for %s - %s (item_id=%s)", request.user.username, item.title, item.id)
+                    logging.getLogger(__name__).info("Triggered background collection fetch for %s - %s (item_id=%s)", request.user.username, item_obj.title, item_obj.id)
                     fetching_collection_data = True
-                    item_id_for_polling = item.id
+                    item_id_for_polling = item_obj.id
         except Item.DoesNotExist:
             pass
 
@@ -2906,7 +2910,7 @@ def _build_missing_season_metadata(
                 episode_item.runtime_minutes
                 and episode_item.runtime_minutes < 999998
             ):
-                runtime = tmdb.get_readable_duration(episode_item.runtime_minutes)
+                runtime = get_tv_provider(source).get_readable_duration(episode_item.runtime_minutes)
             if episode_item.title and episode_item.title != show_title:
                 title = episode_item.title
 
@@ -3135,7 +3139,7 @@ def season_details(
                 episodes_in_db,
             )
         else:
-            season_metadata["episodes"] = tmdb.process_episodes(
+            season_metadata["episodes"] = get_tv_provider(source).process_episodes(
                 season_metadata,
                 episodes_in_db,
             )
@@ -3517,7 +3521,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             # Store raw episodes before processing (for runtime extraction)
             raw_episodes = metadata.get("episodes", [])
             
-            metadata["episodes"] = tmdb.process_episodes(
+            metadata["episodes"] = get_tv_provider(source).process_episodes(
                 metadata,
                 [],
             )
@@ -4632,7 +4636,7 @@ def episode_save(request):
 
         item, _ = Item.objects.get_or_create(
             media_id=media_id,
-            source=Sources.TMDB.value,
+            source=source,
             media_type=MediaTypes.SEASON.value,
             season_number=season_number,
             defaults={
@@ -8758,7 +8762,7 @@ def collection_add(request):
         return _collection_redirect(request)
 
     try:
-        item = Item.objects.get(id=item_id)
+        item_obj = Item.objects.get(id=item_id)
     except Item.DoesNotExist:
         if request.headers.get("HX-Request"):
             return HttpResponseBadRequest("Item not found")
@@ -8778,7 +8782,7 @@ def collection_add(request):
     if form.is_valid():
         entry = form.save(commit=False)
         entry.user = request.user
-        entry.item = item
+        entry.item = item_obj
         entry.save()
 
         # Collection-only games do not appear in the games media list.
@@ -8991,8 +8995,8 @@ def collection_status_api(request, item_id):
     from app.helpers import is_item_collected
     
     try:
-        item = Item.objects.get(id=item_id)
-        collection_entry = is_item_collected(request.user, item)
+        item_obj = Item.objects.get(id=item_id)
+        collection_entry = is_item_collected(request.user, item_obj)
         
         return JsonResponse({
             "has_collection_data": collection_entry is not None,

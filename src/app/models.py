@@ -41,6 +41,8 @@ class Sources(models.TextChoices):
     """Choices for the source of the item."""
 
     TMDB = "tmdb", "The Movie Database"
+    IMDB = "imdb", "The Internet Movie Database"
+    TVDB = "tvdb", "Skyhook (TVDB Mirror)"
     MAL = "mal", "MyAnimeList"
     MANGAUPDATES = "mangaupdates", "MangaUpdates"
     IGDB = "igdb", "Internet Game Database"
@@ -51,6 +53,17 @@ class Sources(models.TextChoices):
     MUSICBRAINZ = "musicbrainz", "MusicBrainz"
     POCKETCASTS = "pocketcasts", "Pocket Casts"
     MANUAL = "manual", "Manual"
+
+
+class MetadataSources(models.TextChoices):
+    """Choices for the metadata sources."""
+
+    TMDB = "tmdb", "The Movie Database"
+    IMDB = "imdb", "The IMDB Database"
+    TVDB = "tvdb", "The TVDB Database"
+    TRAKT = "trakt", "Trakt"
+    TV_RAGE = "tv_rage", "TV Rage"
+    PLEX = "plex", "Plex"
 
 
 class MediaTypes(models.TextChoices):
@@ -73,7 +86,7 @@ class MediaTypes(models.TextChoices):
 class Item(CalendarTriggerMixin, models.Model):
     """Model to store basic information about media items."""
 
-    media_id = models.CharField(max_length=20)
+    media_id = models.CharField(max_length=50)
     source = models.CharField(
         max_length=20,
         choices=Sources.choices,
@@ -3430,7 +3443,7 @@ class PodcastEpisode(models.Model):
         related_name="episodes",
     )
     episode_uuid = models.CharField(
-        max_length=36,
+        max_length=255,
         unique=True,
         help_text="Pocket Casts episode UUID",
     )
@@ -3442,7 +3455,7 @@ class PodcastEpisode(models.Model):
         blank=True,
         help_text="Duration in seconds",
     )
-    audio_url = models.URLField(blank=True, default="")
+    audio_url = models.URLField(blank=True, default="", max_length=1000)
     episode_number = models.PositiveIntegerField(null=True, blank=True)
     season_number = models.PositiveIntegerField(null=True, blank=True)
     file_type = models.CharField(max_length=50, blank=True, default="")
@@ -3699,3 +3712,23 @@ class CollectionEntry(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.item.title}"
+
+
+class ExternalID(models.Model):
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="external_ids")
+    metadata_source = models.CharField(max_length=20, choices=MetadataSources.choices)
+    metadata_source_identifier = models.CharField(max_length=128)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            # Enforce unique (item + source)
+            models.UniqueConstraint(fields=["item", "metadata_source"], name="uniq_item_metadata_source"),
+
+            # Enforce valid source values
+            models.CheckConstraint(
+                check=Q(metadata_source__in=[s.value for s in MetadataSources]),
+                name="externalid_valid_metadata_source",
+            ),
+        ]

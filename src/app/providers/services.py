@@ -22,6 +22,7 @@ from app.providers import (
     openlibrary,
     pocketcasts,
     tmdb,
+    get_tv_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,7 +257,7 @@ def get_media_metadata(
 
     def tmdb_season_metadata():
         """Return TMDB season metadata or raise a not-found error."""
-        seasons = tmdb.tv_with_seasons(media_id, season_numbers)
+        seasons = get_tv_provider(source).tv_with_seasons(media_id, season_numbers)
         season_key = f"season/{season_numbers[0]}"
         if season_key not in seasons:
             raise_not_found_error(
@@ -273,10 +274,10 @@ def get_media_metadata(
             if source == Sources.MANGAUPDATES.value
             else mal.manga(media_id)
         ),
-        MediaTypes.TV.value: lambda: tmdb.tv(media_id),
-        "tv_with_seasons": lambda: tmdb.tv_with_seasons(media_id, season_numbers),
-        MediaTypes.SEASON.value: tmdb_season_metadata,
-        MediaTypes.EPISODE.value: lambda: tmdb.episode(
+        MediaTypes.TV.value: lambda: get_tv_provider(source).tv(media_id),
+        "tv_with_seasons": lambda: get_tv_provider(source).tv_with_seasons(media_id, season_numbers),
+        MediaTypes.SEASON.value: get_tv_provider(source).tv_with_seasons(media_id, season_numbers),
+        MediaTypes.EPISODE.value: lambda: get_tv_provider(source).episode(
             media_id,
             season_numbers[0],
             episode_number,

@@ -3,6 +3,7 @@
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
+from app.models import MediaTypes, Item, Movie, Episode
 
 
 class PlexAccount(models.Model):
@@ -220,3 +221,69 @@ class TraktAccount(models.Model):
     def is_configured(self):
         """Return True when client credentials are stored."""
         return bool(self.client_id and self.client_secret)
+
+
+class UnresolvedImport(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="unresolved_media",)
+    metadata_source = models.CharField(max_length=20)
+    metadata_source_identifier = models.CharField(max_length=128)
+    media_type = models.CharField(max_length=20, choices=MediaTypes.choices)
+    raw_data = models.JSONField(null=True, blank=True)
+    found_metadata_source = models.CharField(max_length=128, blank=True, null=True)
+    found_metadata_source_identifier = models.CharField(max_length=128, blank=True, null=True)
+
+
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
+from django.db import models
+from django.conf import settings
+
+
+class PlexHistory(models.Model):
+    """Store Plex watch history entries, matching plex-trakt.plex_views."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="plex_history", db_index=True)
+    item = models.ForeignKey("app.Item", on_delete=models.CASCADE, blank=True, null=True, related_name="plex_history", db_index=True)
+    plex_id = models.IntegerField()
+    plex_history_id = models.IntegerField(unique=True, db_index=True)
+    viewed_at = models.DateTimeField(db_index=True)
+    device_id = models.IntegerField(blank=True, null=True)
+    archived = models.BooleanField(default=False)
+    matched_media_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    matched_media_type = models.ForeignKey(ContentType, on_delete=models.CASCADE, null=True, blank=True, db_index=True, limit_choices_to=models.Q(app_label='app', model__in=['movie', 'episode']))
+    matched_media = GenericForeignKey('matched_media_type', 'matched_media_id')
+
+    def clean(self):
+        """Ensure matched_media type matches item.media_type"""
+        if not self.matched_media or not self.item:
+            return
+
+        expected_type = self.item.media_type
+        actual_type = None
+
+        if isinstance(self.matched_media, Movie):
+            actual_type = MediaTypes.MOVIE.value
+        elif isinstance(self.matched_media, Episode):
+            actual_type = MediaTypes.EPISODE.value
+
+        if actual_type != expected_type:
+            raise ValidationError(f"Media type mismatch: item={expected_type}, matched={actual_type}")
+
+    def save(self, *args, validate=True, **kwargs):
+        if validate:
+            self.full_clean()
+        super().save(*args, **kwargs)
+
+    class Meta:
+        ordering = ["-viewed_at"]
+
+        indexes = [
+            models.Index(fields=["matched_media_id"]),
+            models.Index(fields=["item", "viewed_at"]),
+            models.Index(fields=["user", "viewed_at"]),
+            models.Index(fields=["matched_media_type", "matched_media_id"]),
+        ]
+
+    def __str__(self):
+        return f"{self.item} ({self.viewed_at})"

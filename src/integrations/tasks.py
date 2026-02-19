@@ -3,6 +3,7 @@ import time
 from io import BytesIO
 
 from celery import shared_task
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
@@ -31,6 +32,7 @@ from integrations.imports import (
     trakt,
     yamtrack,
 )
+from integrations.imports.plex import session_watch_sync
 
 logger = logging.getLogger(__name__)
 ERROR_TITLE = "\n\n\n Couldn't import the following media: \n\n"
@@ -241,8 +243,24 @@ def import_hardcover(file, user_id, mode):
 @shared_task(name="Import from Plex")
 def import_plex(library, user_id, mode, username=None):  # noqa: ARG001
     """Celery task for importing media data from Plex."""
-    return import_media(plex.importer, library, user_id, mode)
+    if settings.PLEX_WATCH_SYNC:
+        import_func = plex.watch_sync
+    else:
+        import_func = plex.importer
+    return import_media(import_func, library, user_id, mode)
 
+
+@shared_task(name="Import from Plex (Recurring)")
+def import_plex_history_recurring(user_id):
+    """Task to display in recurring section"""
+    return import_plex(None, user_id, mode="new")
+
+
+@shared_task(name="Scrobble Plex sessions (Recurring)")
+def scrobble_plex_sessions(user_id):
+    """Task to display in recurring section"""
+    user = get_user_model().objects.get(id=user_id)
+    return session_watch_sync(user)
 
 @shared_task(name="Import from Pocket Casts")
 def import_pocketcasts(user_id, mode="new"):
@@ -253,7 +271,7 @@ def import_pocketcasts(user_id, mode="new"):
 @shared_task(name="Import from Pocket Casts (Recurring)")
 def import_pocketcasts_history(user_id):
     """Recurring import task for Pocket Casts (called every 2 hours via Celery beat)."""
-    return import_pocketcasts.delay(user_id, mode="new")
+    return import_pocketcasts(user_id, mode="new")
 
 
 @shared_task(name="Poll Last.fm for all users")
@@ -2101,3 +2119,25 @@ def scheduled_backup_export(user_id, media_types=None, include_lists=True):
     user = User.objects.get(id=user_id)
     filepath = exports.write_backup(user, media_types=media_types, include_lists=include_lists)
     return f"Backup saved to {filepath}"
+  
+@shared_task(name="Process Unresolved Imports")
+def process_unresolved_imports(user_id, username=None):
+    from integrations.imports.helpers import initiate_unresolved_import
+
+    """
+    Celery task to reprocess unresolved media for a user.
+    """
+    User = get_user_model()
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        logger.warning("process_unresolved_imports task: user %s does not exist", user_id)
+        return {"success": 0, "failed": 0}
+
+    # Call the helper function"
+    logger.info("Starting unresolved media reprocessing for user %s", user.username)
+    result, warnings = initiate_unresolved_import(user)
+
+    logger.info(f"Successfully reprocessed {len(result)} records for user %s: success=%s")
+
+    return format_import_message(result, warnings)
