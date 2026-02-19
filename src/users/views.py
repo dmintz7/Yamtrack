@@ -286,9 +286,11 @@ def test_notification(request):
         result = apobj.notify(
             title="YamTrack Test Notification",
             body=(
-                "This is a test notification from YamTrack. "
-                "If you're seeing this, your notifications are working correctly!"
+                "<p>This is a test notification from YamTrack.</p>"
+                "<p>If you're seeing this, "
+                "your notifications are working correctly!</p>"
             ),
+            body_format=apprise.NotifyFormat.HTML,
         )
 
         if result:
@@ -381,6 +383,9 @@ def preferences(request):
         title_display_preference = request.POST.get("title_display_preference")
         top_talent_sort_by = request.POST.get("top_talent_sort_by")
         rating_scale = request.POST.get("rating_scale")
+        progress_bar_raw = request.POST.get("progress_bar")
+        hide_completed_recommendations_raw = request.POST.get("hide_completed_recommendations")
+        hide_zero_rating_raw = request.POST.get("hide_zero_rating")
         quick_season_update_mobile = request.POST.get("quick_season_update_mobile") == "1"
         book_comic_manga_progress_percentage = request.POST.get("book_comic_manga_progress_percentage") == "1"
 
@@ -467,6 +472,24 @@ def preferences(request):
                 request.user.rating_scale = rating_scale
                 fields_to_update.append("rating_scale")
                 rating_scale_changed = True
+
+        if progress_bar_raw is not None:
+            progress_bar = progress_bar_raw == "1"
+            if request.user.progress_bar != progress_bar:
+                request.user.progress_bar = progress_bar
+                fields_to_update.append("progress_bar")
+
+        if hide_completed_recommendations_raw is not None:
+            hide_completed_recommendations = hide_completed_recommendations_raw == "1"
+            if request.user.hide_completed_recommendations != hide_completed_recommendations:
+                request.user.hide_completed_recommendations = hide_completed_recommendations
+                fields_to_update.append("hide_completed_recommendations")
+
+        if hide_zero_rating_raw is not None:
+            hide_zero_rating = hide_zero_rating_raw == "1"
+            if request.user.hide_zero_rating != hide_zero_rating:
+                request.user.hide_zero_rating = hide_zero_rating
+                fields_to_update.append("hide_zero_rating")
 
         if request.user.quick_season_update_mobile != quick_season_update_mobile:
             request.user.quick_season_update_mobile = quick_season_update_mobile

@@ -3,6 +3,7 @@ import logging
 from datetime import UTC, date, timedelta
 
 import icalendar
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_not_required
 from django.core.exceptions import ObjectDoesNotExist
@@ -12,6 +13,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from app.models import MediaTypes, PodcastEpisode
 from events import tasks
 from events.models import Event
 from users.models import User
@@ -66,8 +68,42 @@ def calendar(request):
     # Get events and organize by day
     releases = Event.objects.get_user_events(request.user, first_day, last_day)
 
+    podcast_media_ids = [
+        release.item.media_id
+        for release in releases
+        if release.item.media_type == MediaTypes.PODCAST.value
+    ]
+    podcast_art_by_episode_uuid = {}
+    if podcast_media_ids:
+        podcast_art_by_episode_uuid = {
+            episode.episode_uuid: episode.show.image
+            for episode in PodcastEpisode.objects.filter(
+                episode_uuid__in=podcast_media_ids,
+            ).select_related("show")
+            if episode.show and episode.show.image
+        }
+
+    release_media_types = {
+        release.item.media_type
+        for release in releases
+        if release.item and release.item.media_type
+    }
+    available_media_types = sorted(
+        release_media_types,
+        key=lambda media_type: MediaTypes(media_type).label,
+    )
+
     release_dict = {}
     for release in releases:
+        if (
+            release.item.media_type == MediaTypes.PODCAST.value
+            and release.item.image in {"", settings.IMG_NONE}
+        ):
+            release.item.image = podcast_art_by_episode_uuid.get(
+                release.item.media_id,
+                settings.IMG_NONE,
+            )
+
         # Convert UTC datetime to user's timezone and extract day
         local_datetime = timezone.localtime(release.datetime)
         day = local_datetime.day
@@ -77,9 +113,20 @@ def calendar(request):
 
     # Get today's date for highlighting
     today = timezone.localdate()
+    days_in_month = range(1, last_day.day + 1)
+    selected_day = (
+        today.day
+        if month == today.month and year == today.year
+        else next(iter(sorted(release_dict.keys())), 1)
+    )
 
     context = {
         "user": request.user,
+        "media_types": [
+            media_type.value
+            for media_type in MediaTypes
+            if media_type != MediaTypes.EPISODE
+        ],
         "calendar": calendar_format,
         "month": month,
         "month_name": month_name,
@@ -91,6 +138,9 @@ def calendar(request):
         "release_dict": release_dict,
         "today": today,
         "view_type": view_type,
+        "available_media_types": available_media_types,
+        "days_in_month": days_in_month,
+        "selected_day": selected_day,
     }
     return render(request, "events/calendar.html", context)
 
@@ -106,7 +156,7 @@ def reload_calendar(request):
 @login_not_required
 @csrf_exempt
 @require_http_methods(["GET", "HEAD", "PROPFIND"])
-def download_calendar(_, token: str):
+def download_calendar(request, token: str):
     """Download the calendar as a iCalendar file."""
     try:
         user = User.objects.get(token=token)
@@ -125,6 +175,21 @@ def download_calendar(_, token: str):
 
     # Retrieve release events
     releases = Event.objects.get_user_events(user, start_date, end_date)
+
+    selected_media_types = request.GET.getlist("media_types")
+    if selected_media_types:
+        valid_media_types = {
+            media_type
+            for media_type in selected_media_types
+            if media_type in {choice.value for choice in MediaTypes}
+        }
+
+        # TV release events are stored at the season level.
+        if MediaTypes.TV.value in valid_media_types:
+            valid_media_types.add(MediaTypes.SEASON.value)
+
+        if valid_media_types:
+            releases = releases.filter(item__media_type__in=valid_media_types)
 
     # Create iCalendar object
     cal = icalendar.Calendar()

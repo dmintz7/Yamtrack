@@ -3255,7 +3255,14 @@ def _aggregate_statistics_from_days(
     top_rated_heap = []
     top_rated_by_type = {}
     global_counter = itertools.count()
-    score_range = range(11)
+    score_scale_max = getattr(user, "rating_scale_max", 10)
+    try:
+        score_scale_max = int(score_scale_max)
+    except (TypeError, ValueError):
+        score_scale_max = 10
+    if score_scale_max not in (5, 10):
+        score_scale_max = 10
+    score_range = range(score_scale_max + 1)
 
     for media_type in active_types:
         items = items_by_type.get(media_type, {})
@@ -3268,21 +3275,27 @@ def _aggregate_statistics_from_days(
             score = meta.get("score")
             if score is None:
                 continue
-            binned = int(score)
+            score_value = float(score)
+            score_value_scaled = score_value / 2 if score_scale_max == 5 else score_value
+            binned = int(score_value_scaled)
+            if binned < 0:
+                binned = 0
+            if binned > score_scale_max:
+                binned = score_scale_max
             score_counts[binned] += 1
             total_scored += 1
-            total_score_sum += score
+            total_score_sum += score_value_scaled
             media_id = meta.get("media_id")
             if media_id is None:
                 continue
             if len(top_rated_heap) < 14:
-                heapq.heappush(top_rated_heap, (float(score), next(global_counter), meta))
+                heapq.heappush(top_rated_heap, (score_value, next(global_counter), meta))
             else:
-                heapq.heappushpop(top_rated_heap, (float(score), next(global_counter), meta))
+                heapq.heappushpop(top_rated_heap, (score_value, next(global_counter), meta))
             if len(type_heap) < 20:
-                heapq.heappush(type_heap, (float(score), next(type_counter), meta))
+                heapq.heappush(type_heap, (score_value, next(type_counter), meta))
             else:
-                heapq.heappushpop(type_heap, (float(score), next(type_counter), meta))
+                heapq.heappushpop(type_heap, (score_value, next(type_counter), meta))
         score_distribution[media_type] = score_counts
         top_rated_by_type[media_type] = [
             meta for _, _, meta in sorted(type_heap, key=lambda x: (-x[0], x[1]))
@@ -3349,6 +3362,7 @@ def _aggregate_statistics_from_days(
         ],
         "average_score": average_score,
         "total_scored": total_scored,
+        "scale_max": score_scale_max,
     }
 
     top_played = {}
@@ -3883,6 +3897,11 @@ def get_statistics_data(user, start_date, end_date, range_name=None):
         _normalize_history_highlight_images(data.get("history_highlights"))
         return data
 
+    eager_mode = bool(
+        getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False)
+        or getattr(settings, "TESTING", False),
+    )
+
     cache_entry = cache.get(_cache_key(user.id, range_name))
     if cache_entry:
         # Always return cached data if it exists (even if stale)
@@ -3891,9 +3910,21 @@ def get_statistics_data(user, start_date, end_date, range_name=None):
         history_version = cache_entry.get("history_version")
         current_version = _get_history_version(user.id)
         if history_version and history_version != current_version:
+            if eager_mode:
+                data = refresh_statistics_cache(user.id, range_name)
+                if data:
+                    _normalize_hours_per_media_type(data.get("hours_per_media_type"))
+                    _normalize_history_highlight_images(data.get("history_highlights"))
+                    return data
             schedule_statistics_refresh(user.id, range_name, allow_inline=False)
         elif not history_version:
             if not built_at or timezone.now() - built_at > STATISTICS_STALE_AFTER:
+                if eager_mode:
+                    data = refresh_statistics_cache(user.id, range_name)
+                    if data:
+                        _normalize_hours_per_media_type(data.get("hours_per_media_type"))
+                        _normalize_history_highlight_images(data.get("history_highlights"))
+                        return data
                 schedule_statistics_refresh(user.id, range_name, allow_inline=False)
         data = cache_entry.get("data", {})
         _normalize_hours_per_media_type(data.get("hours_per_media_type"))
@@ -3903,6 +3934,12 @@ def get_statistics_data(user, start_date, end_date, range_name=None):
     # Cache miss - check if refresh is in progress
     refresh_lock = cache.get(_refresh_lock_key(user.id, range_name))
     if refresh_lock is not None:
+        if eager_mode:
+            data = refresh_statistics_cache(user.id, range_name)
+            if data:
+                _normalize_hours_per_media_type(data.get("hours_per_media_type"))
+                _normalize_history_highlight_images(data.get("history_highlights"))
+                return data
         # Refresh is in progress, return minimal empty data structure
         # Frontend will poll and update when refresh completes
         # Don't build full statistics here - that's expensive and causes delays
@@ -3911,7 +3948,7 @@ def get_statistics_data(user, start_date, end_date, range_name=None):
 
     # No cache and no refresh in progress.
     # In eager mode (tests), build inline. Otherwise schedule and return empty.
-    if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
+    if eager_mode:
         data = refresh_statistics_cache(user.id, range_name)
         if data:
             _normalize_hours_per_media_type(data.get("hours_per_media_type"))

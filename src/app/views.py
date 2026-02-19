@@ -1926,7 +1926,11 @@ def media_search(request):
 
     # Enrich search results with user tracking data
     if data.get("results"):
-        data["results"] = helpers.enrich_items_with_user_data(request, data["results"])
+        data["results"] = helpers.enrich_items_with_user_data(
+            request,
+            data["results"],
+            section_name="search",
+        )
         for result in data["results"]:
             result["matched_title"] = _matched_title(result.get("item"), query)
 
@@ -2779,6 +2783,7 @@ def media_details(
                     helpers.enrich_items_with_user_data(
                         request,
                         related_items,
+                        section_name=section_name,
                         user=list_owner,
                     )
                 )
@@ -3185,6 +3190,7 @@ def season_details(
                     helpers.enrich_items_with_user_data(
                         request,
                         related_items,
+                        section_name=section_name,
                         user=list_owner,
                     )
                 )

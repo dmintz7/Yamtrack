@@ -9,9 +9,10 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_not_required, login_required
 from django.core.paginator import Paginator
 from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, Subquery
-from django.http import Http404, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_POST
@@ -512,16 +513,20 @@ def list_detail(request, list_id):
 
     # Get and process request parameters
     # Handle anonymous users by using default values
+    valid_sorts = [choice[0] for choice in ListDetailSortChoices.choices]
+    valid_statuses = [choice[0] for choice in MediaStatusChoices.choices]
+
     if request.user.is_authenticated:
         sort_by = request.user.update_preference(
             "list_detail_sort",
             request.GET.get("sort"),
         )
+        if sort_by not in valid_sorts:
+            sort_by = "date_added"
     else:
         # Default sort for anonymous users
         sort_by = request.GET.get("sort", "date_added")
         # Validate sort choice
-        valid_sorts = [choice[0] for choice in ListDetailSortChoices.choices]
         if sort_by not in valid_sorts:
             sort_by = "date_added"
 
@@ -530,9 +535,10 @@ def list_detail(request, list_id):
             "list_detail_status",
             request.GET.get("status"),
         )
+        if status_filter not in valid_statuses:
+            status_filter = MediaStatusChoices.ALL
     else:
         status_filter = request.GET.get("status", MediaStatusChoices.ALL)
-        valid_statuses = [choice[0] for choice in MediaStatusChoices.choices]
         if status_filter not in valid_statuses:
             status_filter = MediaStatusChoices.ALL
 
@@ -651,6 +657,7 @@ def list_detail(request, list_id):
     # Apply sorting
     sort_mapping = {
         "date_added": ["-customlistitem__date_added"],
+        "custom": ["customlistitem__date_added", "customlistitem__id"],
         "title": [
             F("title").asc(nulls_last=True),
             F("season_number").asc(nulls_first=True),
@@ -744,6 +751,7 @@ def list_detail(request, list_id):
         "status_choices": MediaStatusChoices.choices,
         "public_view": public_view,
         "can_edit": can_edit,
+        "list_ordering_enabled": can_edit and params["sort_by"] == ListDetailSortChoices.CUSTOM,
         "is_public_view": is_public_view,
         "recommendation_count": recommendation_count,
         "base_template": "base_public.html" if public_view else "base.html",
@@ -911,6 +919,61 @@ def list_item_toggle(request):
         "lists/components/list_item_button.html",
         {"custom_list": custom_list, "item": item, "has_item": has_item},
     )
+
+
+@login_required
+@require_POST
+def reorder_list_item(request, list_id):
+    """Reorder a list item in custom sort mode."""
+    custom_list = get_object_or_404(CustomList, id=list_id)
+    if not custom_list.user_can_edit(request.user):
+        return HttpResponse(status=403)
+
+    item_id = request.POST.get("item_id")
+    action = (request.POST.get("action") or "").strip().lower()
+    if not item_id or action not in {"first", "back", "next", "last"}:
+        return HttpResponse(status=400)
+
+    list_items = list(
+        CustomListItem.objects.filter(custom_list=custom_list)
+        .select_related("item")
+        .order_by("date_added", "id"),
+    )
+    if len(list_items) < 2:
+        return HttpResponse(status=204)
+
+    current_index = next(
+        (
+            index
+            for index, custom_list_item in enumerate(list_items)
+            if str(custom_list_item.item_id) == str(item_id)
+        ),
+        None,
+    )
+    if current_index is None:
+        return HttpResponse(status=404)
+
+    if action == "first":
+        new_index = 0
+    elif action == "back":
+        new_index = max(0, current_index - 1)
+    elif action == "next":
+        new_index = min(len(list_items) - 1, current_index + 1)
+    else:
+        new_index = len(list_items) - 1
+
+    if new_index == current_index:
+        return HttpResponse(status=204)
+
+    moved_item = list_items.pop(current_index)
+    list_items.insert(new_index, moved_item)
+
+    base_time = timezone.now().replace(microsecond=0)
+    for index, custom_list_item in enumerate(list_items):
+        custom_list_item.date_added = base_time + datetime.timedelta(seconds=index)
+    CustomListItem.objects.bulk_update(list_items, ["date_added"])
+
+    return HttpResponse(status=204)
 
 
 # =============================================================================

@@ -1,5 +1,6 @@
 import logging
 import time
+from io import BytesIO
 
 from celery import shared_task
 from django.conf import settings
@@ -14,6 +15,7 @@ from app.helpers import is_item_collected
 from app.mixins import disable_fetch_releases
 from app.models import CollectionEntry, Item, MediaTypes
 from app.templatetags import app_tags
+from integrations import plex as plex_api
 from integrations.imports import (
     anilist,
     goodreads,
@@ -34,6 +36,22 @@ from integrations.imports.plex import session_watch_sync
 
 logger = logging.getLogger(__name__)
 ERROR_TITLE = "\n\n\n Couldn't import the following media: \n\n"
+
+
+def _coerce_uploaded_file(file):
+    """Normalize uploaded file task args to a binary file-like object."""
+    if hasattr(file, "read"):
+        try:
+            file.seek(0)
+        except (AttributeError, OSError):
+            pass
+        return file
+    if isinstance(file, str):
+        return BytesIO(file.encode("utf-8"))
+    if isinstance(file, bytes):
+        return BytesIO(file)
+    msg = f"Unsupported uploaded file payload type: {type(file)!r}"
+    raise TypeError(msg)
 
 
 def format_media_type_display(count, media_type):
@@ -189,13 +207,13 @@ def import_kitsu(username, user_id, mode):
 @shared_task(name="Import from Yamtrack")
 def import_yamtrack(file, user_id, mode):
     """Celery task for importing media data from Yamtrack."""
-    return import_media(yamtrack.importer, file, user_id, mode)
+    return import_media(yamtrack.importer, _coerce_uploaded_file(file), user_id, mode)
 
 
 @shared_task(name="Import from HowLongToBeat")
 def import_hltb(file, user_id, mode):
     """Celery task for importing media data from HowLongToBeat."""
-    return import_media(hltb.importer, file, user_id, mode)
+    return import_media(hltb.importer, _coerce_uploaded_file(file), user_id, mode)
 
 
 @shared_task(name="Import from Steam")
@@ -207,19 +225,19 @@ def import_steam(username, user_id, mode):
 @shared_task(name="Import from IMDB")
 def import_imdb(file, user_id, mode):
     """Celery task for importing media data from IMDB."""
-    return import_media(imdb.importer, file, user_id, mode)
+    return import_media(imdb.importer, _coerce_uploaded_file(file), user_id, mode)
 
 
 @shared_task(name="Import from GoodReads")
 def import_goodreads(file, user_id, mode):
     """Celery task for importing media data from GoodReads."""
-    return import_media(goodreads.importer, file, user_id, mode)
+    return import_media(goodreads.importer, _coerce_uploaded_file(file), user_id, mode)
 
 
 @shared_task(name="Import from Hardcover")
 def import_hardcover(file, user_id, mode):
     """Celery task for importing media data from Hardcover."""
-    return import_media(hardcover.importer, file, user_id, mode)
+    return import_media(hardcover.importer, _coerce_uploaded_file(file), user_id, mode)
 
 
 @shared_task(name="Import from Plex")

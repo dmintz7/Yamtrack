@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -142,22 +143,36 @@ def generate_final_message(items_to_process, items_updated):
 def cleanup_invalid_events(events_bulk):
     """Remove events that are no longer valid based on updated items."""
     processed_items = {}
+    processed_without_content = set()
 
     for event in events_bulk:
-        if event.content_number is not None:
+        if event.content_number is None:
+            processed_without_content.add(event.item.id)
+        else:
             try:
                 processed_items[event.item.id].add(event.content_number)
             except KeyError:
                 processed_items[event.item.id] = {event.content_number}
 
     all_events = Event.objects.filter(
-        item_id__in=processed_items.keys(),
+        item_id__in=set(processed_items.keys()) | processed_without_content,
     ).select_related("item")
 
     events_to_delete = []
 
     for event in all_events:
         if (
+            event.item_id in processed_without_content
+            and event.content_number is not None
+        ):
+            logger.info(
+                "Invalid event detected: %s - Number %s (scheduled for %s)",
+                event.item,
+                event.content_number,
+                event.datetime,
+            )
+            events_to_delete.append(event.id)
+        elif (
             event.content_number is not None
             and event.item_id in processed_items
             and event.content_number not in processed_items[event.item_id]
@@ -296,10 +311,14 @@ def process_anime_bulk(items, events_bulk):
 
         if episodes:
             for episode in episodes:
-                episode_datetime = datetime.fromtimestamp(
-                    episode["airingAt"],
-                    tz=ZoneInfo("UTC"),
-                )
+                # when schedule less than total episodes and end date is null
+                if episode["airingAt"] is None:
+                    episode_datetime = datetime.min.replace(tzinfo=ZoneInfo("UTC"))
+                else:
+                    episode_datetime = datetime.fromtimestamp(
+                        episode["airingAt"],
+                        tz=ZoneInfo("UTC"),
+                    )
                 events_bulk.append(
                     Event(
                         item=item,
@@ -309,7 +328,7 @@ def process_anime_bulk(items, events_bulk):
                 )
         else:
             logger.info(
-                "Anime: %s (%s), not found in AniList",
+                "Anime: %s (%s), not proccesed by AniList",
                 item.title,
                 item.media_id,
             )
@@ -360,35 +379,52 @@ def get_anime_schedule_bulk(media_ids):
             total_episodes = media["episodes"]
             mal_id = str(media["idMal"])
 
-            # First check if we know the total episode count
-            if total_episodes:
-                if airing_schedule:
-                    # Filter out episodes beyond the total count
-                    original_length = len(airing_schedule)
-                    airing_schedule = [
-                        episode
-                        for episode in airing_schedule
-                        if episode["episode"] <= total_episodes
-                    ]
+            if not total_episodes:
+                continue
 
-                    # Log if any filtering occurred
-                    if original_length > len(airing_schedule):
-                        logger.info(
-                            "Filtered episodes for MAL ID %s - keep only %s episodes",
-                            mal_id,
-                            total_episodes,
-                        )
+            if airing_schedule:
+                # Filter out episodes beyond the total count
+                original_length = len(airing_schedule)
+                airing_schedule = [
+                    episode
+                    for episode in airing_schedule
+                    if episode["episode"] <= total_episodes
+                ]
 
-                # Add final episode if schedule is missing or incomplete
-                if (
-                    not airing_schedule
-                    or airing_schedule[-1]["episode"] < total_episodes
-                ):
-                    end_date_timestamp = anilist_date_parser(media["endDate"])
-                    if end_date_timestamp:
-                        airing_schedule.append(
-                            {"episode": total_episodes, "airingAt": end_date_timestamp},
-                        )
+                # Log if any filtering occurred
+                if original_length > len(airing_schedule):
+                    logger.info(
+                        "Filtered episodes for MAL ID %s - keep only %s episodes",
+                        mal_id,
+                        total_episodes,
+                    )
+
+            # incomplete data from AniList
+            if not airing_schedule or airing_schedule[-1]["episode"] < total_episodes:
+                mal_metadata = services.get_media_metadata(
+                    media_type=MediaTypes.ANIME.value,
+                    media_id=mal_id,
+                    source=Sources.MAL.value,
+                )
+                mal_total_episodes = mal_metadata["max_progress"]
+                if mal_total_episodes and mal_total_episodes > total_episodes:
+                    logger.info(
+                        "MAL ID %s - MAL has %s episodes, AniList has %s",
+                        mal_id,
+                        mal_total_episodes,
+                        total_episodes,
+                    )
+                    continue
+
+                logger.info(
+                    "Adding final episode for MAL ID %s - Ep %s",
+                    mal_id,
+                    total_episodes,
+                )
+                end_date_timestamp = anilist_date_parser(media["endDate"])
+                airing_schedule.append(
+                    {"episode": total_episodes, "airingAt": end_date_timestamp},
+                )
 
             # Store the processed schedule
             all_data[mal_id] = airing_schedule
@@ -848,9 +884,25 @@ def process_comic(item, events_bulk):
         return
 
     if issue_metadata["store_date"]:
-        issue_datetime = date_parser(issue_metadata["store_date"])
+        try:
+            issue_datetime = date_parser(issue_metadata["store_date"])
+        except ValueError:
+            logger.warning(
+                "Skipping comic event for %s due to invalid store_date: %s",
+                item,
+                issue_metadata["store_date"],
+            )
+            return
     elif issue_metadata["cover_date"]:
-        issue_datetime = date_parser(issue_metadata["cover_date"])
+        try:
+            issue_datetime = date_parser(issue_metadata["cover_date"])
+        except ValueError:
+            logger.warning(
+                "Skipping comic event for %s due to invalid cover_date: %s",
+                item,
+                issue_metadata["cover_date"],
+            )
+            return
     else:
         return
 
@@ -880,36 +932,58 @@ def process_other(item, events_bulk):
         return
 
     date_key = config.get_date_key(item.media_type)
+    content_number = _coerce_content_number(item.media_type, metadata.get("max_progress"))
+    details = metadata.get("details", {})
+    content_datetime = None
 
-    if date_key in metadata["details"] and metadata["details"][date_key]:
+    if date_key in details and details[date_key]:
         try:
-            content_datetime = date_parser(metadata["details"][date_key])
+            content_datetime = date_parser(details[date_key])
         except ValueError:
-            pass
-        else:
-            content_number = (
-                None
-                if item.media_type == MediaTypes.MOVIE.value
-                else metadata["max_progress"]
-            )
-            events_bulk.append(
-                Event(
-                    item=item,
-                    content_number=content_number,
-                    datetime=content_datetime,
-                ),
+            logger.warning(
+                "Skipping provider date for %s due to invalid %s: %s",
+                item,
+                date_key,
+                details[date_key],
             )
 
-    elif item.source == Sources.MANGAUPDATES.value and metadata["max_progress"]:
+    # Use cached item release datetime if provider metadata date is missing/invalid.
+    if content_datetime is None and item.release_datetime:
+        content_datetime = item.release_datetime
+        if timezone.is_naive(content_datetime):
+            content_datetime = timezone.make_aware(content_datetime)
+
+    if content_datetime is not None:
+        events_bulk.append(
+            Event(
+                item=item,
+                content_number=content_number,
+                datetime=content_datetime,
+            ),
+        )
+    elif item.source == Sources.MANGAUPDATES.value and content_number:
         # MangaUpdates doesn't have an end date, so use a placeholder
         content_datetime = datetime.min.replace(tzinfo=ZoneInfo("UTC"))
         events_bulk.append(
             Event(
                 item=item,
-                content_number=metadata["max_progress"],
+                content_number=content_number,
                 datetime=content_datetime,
             ),
         )
+
+
+def _coerce_content_number(media_type, max_progress):
+    """Normalize max_progress to a valid integer content number or None."""
+    if media_type == MediaTypes.MOVIE.value:
+        return None
+    if max_progress in (None, ""):
+        return None
+    try:
+        content_number = int(max_progress)
+    except (TypeError, ValueError):
+        return None
+    return content_number if content_number > 0 else None
 
 
 def process_podcast(item, events_bulk):
@@ -950,20 +1024,40 @@ def date_parser(date_value):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=ZoneInfo("UTC"))
     else:
-        date_str = str(date_value)
-        year_only_parts = 1
-        year_month_parts = 2
-        default_month_day = "-01-01"
-        default_day = "-01"
-        # Preprocess the date string
-        parts = date_str.split("-")
-        if len(parts) == year_only_parts:
-            date_str += default_month_day
-        elif len(parts) == year_month_parts:
-            # Year and month are provided, append "-01"
-            date_str += default_day
+        date_str = str(date_value).strip()
+        if not date_str:
+            msg = "Date value is empty."
+            raise ValueError(msg)
 
-        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=ZoneInfo("UTC"))
+        # Prefer explicit ISO-like dates found anywhere in the string.
+        iso_date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", date_str)
+        if iso_date_match:
+            parsed = datetime.strptime(iso_date_match.group(0), "%Y-%m-%d")
+            dt = parsed.replace(tzinfo=ZoneInfo("UTC"))
+        elif re.fullmatch(r"\d{4}-\d{2}", date_str):
+            parsed = datetime.strptime(f"{date_str}-01", "%Y-%m-%d")
+            dt = parsed.replace(tzinfo=ZoneInfo("UTC"))
+        elif re.fullmatch(r"\d{4}", date_str):
+            parsed = datetime.strptime(f"{date_str}-01-01", "%Y-%m-%d")
+            dt = parsed.replace(tzinfo=ZoneInfo("UTC"))
+        else:
+            parsed = None
+            for date_format in ("%b %d, %Y", "%B %d, %Y", "%b %Y", "%B %Y"):
+                try:
+                    parsed = datetime.strptime(date_str, date_format)
+                    break
+                except ValueError:
+                    continue
+
+            if parsed is None:
+                msg = f"Invalid date value: {date_str}"
+                raise ValueError(msg)
+
+            # Month-year strings default to first day of month.
+            if date_format in {"%b %Y", "%B %Y"}:
+                parsed = parsed.replace(day=1)
+
+            dt = parsed.replace(tzinfo=ZoneInfo("UTC"))
     # Set to max time and add UTC timezone
     return dt.replace(
         hour=SentinelDatetime.HOUR,
