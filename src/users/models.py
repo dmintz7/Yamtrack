@@ -1133,6 +1133,7 @@ class User(AbstractUser):
         "pocketcasts": "Import from Pocket Casts (Recurring)",
         "lastfm": "Poll Last.fm for all users",
         "plex_scrobble": "Scrobble Plex sessions (Recurring)",
+        "unresolved_import": "Process Unresolved Imports",
     }
 
         # Reverse mapping to get source from task name
