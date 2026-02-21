@@ -4,12 +4,15 @@ import hashlib
 import json
 import logging
 import time
+import requests
 from collections import defaultdict
+from dateutil.parser import parse as parse_date
 
 from cryptography.fernet import Fernet
 from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
+from django.core.cache import cache
 from django.db.utils import OperationalError
 from django.utils import timezone
 from django_celery_beat.models import CrontabSchedule, PeriodicTask
@@ -17,6 +20,7 @@ from simple_history.utils import bulk_create_with_history
 
 import app
 from app.models import MediaTypes
+from app.providers import tmdb, services
 
 logger = logging.getLogger(__name__)
 
@@ -341,3 +345,239 @@ def encrypt(value):
 def decrypt(token):
     """Decrypt value that was encrypted with `encrypt`."""
     return fernet().decrypt(token.encode()).decode()
+
+
+class TMDBResolver:
+    def __init__(self, trakt_data=None, trakt_class=None, history_record=None):
+        """
+        trakt_data: dict (from Trakt)
+        trakt_class: optional Trakt API client
+        history_record: optional Plex EpisodeHistory object
+        """
+        self.trakt = trakt_class
+        self.trakt_data = trakt_data
+        self.history = history_record
+
+        # Extract IDs safely
+        if trakt_data:
+            self.trakt_episode_id = trakt_data.get("episode", {}).get("ids", {}).get("trakt")
+            self.tvdb_episode_id = trakt_data.get("episode", {}).get("ids", {}).get("tvdb")
+            self.tmdb_show_id = trakt_data.get("show", {}).get("ids", {}).get("tmdb")
+            self.episode_title = trakt_data.get("episode", {}).get("title")
+        elif history_record:
+            self.trakt_episode_id = self.history.ids.get("trakt")
+            self.tvdb_episode_id = self.history.ids.get("tvdb")
+            self.tmdb_show_id = self.history.show_ids.get("tmdb")
+            self.episode_title = getattr(history_record, "title", None)
+            self.season_number = getattr(history_record, "seasonNumber", None) or getattr(history_record, "parentIndex", None)
+            self.episode_number = getattr(history_record, "episodeNumber", None) or getattr(history_record, "index", None)
+        else:
+            self.trakt_episode_id = None
+            self.tvdb_episode_id = None
+            self.tmdb_show_id = None
+            self.episode_title = None
+
+        self.show_data = None
+
+    def resolve(self):
+        """
+        Resolve the episode using airdate, TMDb show data, or Plex history record.
+        """
+        episode_airdate = None
+        if self.tvdb_episode_id:
+            episode_airdate = self._fetch_tvdb_airdate()
+        if self.trakt_episode_id and not episode_airdate:
+            episode_airdate = self._fetch_trakt_airdate()
+
+        if self.history:
+            originally_available = getattr(self.history.plex_obj, "originallyAvailableAt", None)
+            if originally_available:
+                episode_airdate = originally_available.date()
+
+        # --- Fetch TMDb show data ---
+        if self.tmdb_show_id:
+            self.show_data = self._fetch_show_data()
+
+        else:
+            logger.warning("No TMDb show ID or history record")
+            return None
+
+        season_number = self._match_season(episode_airdate)
+        if not season_number:
+            logger.warning("No matching season found for airdate %s", episode_airdate)
+            return None
+
+        matched_episode = self._match_episode(season_number, airdate=episode_airdate, title=self.episode_title)
+        if matched_episode:
+            logger.info(f"Matched episode: Season {season_number} Episode {matched_episode.get('episode_number')} ({matched_episode.get('name')})")
+            return matched_episode
+
+        logger.warning(f"No matching episode found for Season {season_number} - {self.episode_title}")
+        return None
+
+    def _fetch_trakt_airdate(self):
+        if not self.trakt_episode_id or not self.trakt:
+            return None
+        cache_key = f"trakt_episode_airdate_{self.trakt_episode_id}"
+        try:
+            data = cache.get(cache_key)
+            if not data and self.trakt:
+                data = self.trakt._make_api_request(f"{self.trakt.base_url}/episodes/{self.trakt_episode_id}?extended=full")
+                cache.set(cache_key, data)
+        except Exception:
+            cache.set(cache_key, None)
+            return None
+
+        first_aired = data.get("first_aired")
+        if not first_aired:
+            return None
+
+        airdate = parse_date(first_aired)
+        return airdate.date() if airdate else None
+
+    def _fetch_tvdb_airdate(self):
+        if not self.tvdb_episode_id:
+            return None
+        cache_key = f"tvdb_episode_airdate_{self.tvdb_episode_id}"
+        try:
+            data = cache.get(cache_key)
+            if not data:
+                import requests
+                resp = requests.get(f"https://api.thetvdb.com/episodes/{self.tvdb_episode_id}")
+                if resp.status_code != 200:
+                    cache.set(cache_key, None)
+                    return None
+                data = resp.json().get("data")
+                cache.set(cache_key, data)
+        except Exception:
+            cache.set(cache_key, None)
+            return None
+
+        if not data:
+            return None
+
+        first_aired = data.get("firstAired")
+        if not first_aired:
+            return None
+
+        airdate = parse_date(first_aired)
+        return airdate.date() if airdate else None
+
+    def _fetch_show_data(self):
+        logger.debug("Fetching TMDB show data for show ID %s", self.tmdb_show_id)
+        return tmdb.tv(self.tmdb_show_id)
+
+    def _fetch_season_episodes(self, season_number):
+        logger.debug("Fetching episodes for season %s of show %s", season_number, self.tmdb_show_id)
+        resp = tmdb.tv_with_seasons(self.tmdb_show_id, [season_number])
+        episodes = resp.get(f"season/{season_number}", {}).get("episodes", [])
+        return episodes
+
+    def _match_season(self, episode_airdate):
+        seasons = self.show_data.get("related", {}).get("seasons", [])
+        for season in reversed(seasons):
+            season_number = season.get("season_number")
+            first_air = season.get("first_air_date")
+            if not first_air:
+                continue
+
+            first_air_date = parse_date(first_air) if isinstance(first_air, str) else first_air
+            if not first_air_date:
+                continue
+
+            if first_air_date.date() <= episode_airdate:
+                return season_number
+
+        return None
+
+    def _match_episode(self, season_number, airdate=None, title=None):
+        episodes = self._fetch_season_episodes(season_number)
+        if airdate:
+            for ep in episodes:
+                if ep.get("air_date") and parse_date(ep["air_date"]).date() == airdate:
+                    return ep
+        if title:
+            title_norm = title.lower()
+            for ep in episodes:
+                if ep.get("name", "").lower() == title_norm:
+                    return ep
+        return None
+
+
+def get_metadata_by_priority(media_type, source_ids: dict, title, season_number=None, source_found=None):
+    """
+    Try metadata providers in priority order.
+    source_ids = {"tmdb": "123", "tvdb": "456"}
+    """
+
+    from app.config import get_property
+    for source in get_property(media_type, "sources"):
+        if source_found is not None and source_found != source.value:
+            continue
+        source_key = source.value
+        source_id = source_ids.get(source_key)
+        if not source_id:
+            continue
+        
+        metadata = get_metadata(media_type, source_key, source_id, title, season_number)
+        if metadata:
+            return metadata, source, source_id
+
+    return None, None, None
+
+
+def get_metadata(media_type, source_key, source_id, title, season_number=None):
+    """Get metadata for a media item."""
+    try:
+        kwargs = {}
+        if season_number is not None:
+            kwargs["season_numbers"] = [season_number]
+
+        return services.get_media_metadata(
+            media_type,
+            source_id,
+            source_key,
+            **kwargs,
+        )
+    except KeyError as e:
+        if 'season/' in e.args[0]:
+            logger.debug(f"Ignoring unknown season {e.args[0]} for {source_key} {source_id} {title}")
+            return None
+        raise
+    except services.ProviderAPIError as error:
+        if error.status_code == requests.codes.not_found:
+            return None
+        raise
+
+
+def get_or_create_item(
+    media_type,
+    source_key,
+    source_id,
+    metadata,
+    season_number=None,
+    episode_number=None,
+):
+    item_kwargs = {
+        "media_id": source_id,
+        "source": source_key,
+        "media_type": media_type,
+    }
+
+    if season_number is not None:
+        item_kwargs["season_number"] = season_number
+
+    if episode_number is not None:
+        item_kwargs["episode_number"] = episode_number
+
+    defaults = {
+        "title": metadata["title"],
+        "image": metadata["image"],
+    }
+
+    item, _ = app.models.Item.objects.get_or_create(
+        **item_kwargs,
+        defaults=defaults,
+    )
+
+    return item

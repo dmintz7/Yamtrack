@@ -12,7 +12,7 @@ from simple_history.utils import bulk_update_with_history
 
 from app import config
 from app.models import TV, Item, MediaTypes, PodcastEpisode, Sources, Status
-from app.providers import comicvine, services, tmdb
+from app.providers import comicvine, services, get_tv_provider
 from events.models import Event, SentinelDatetime
 
 logger = logging.getLogger(__name__)
@@ -467,7 +467,7 @@ def process_tv(tv_item, events_bulk):
 
 def get_seasons_to_process(tv_item):
     """Identify which seasons of a TV show need to be processed."""
-    tv_metadata = tmdb.tv(tv_item.media_id)
+    tv_metadata = get_tv_provider(tv_item.source).tv(tv_item.media_id)
 
     if not tv_metadata.get("related", {}).get("seasons"):
         logger.warning("No seasons found for TV show: %s", tv_item)
@@ -520,7 +520,7 @@ def get_seasons_to_process(tv_item):
 def process_tv_seasons(tv_item, seasons_to_process, events_bulk):
     """Process specific seasons of a TV show."""
     # Fetch detailed data for seasons to process
-    process_seasons_data = tmdb.tv_with_seasons(
+    process_seasons_data = get_tv_provider(tv_item.source).tv_with_seasons(
         tv_item.media_id,
         seasons_to_process,
     )

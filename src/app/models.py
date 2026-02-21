@@ -41,6 +41,8 @@ class Sources(models.TextChoices):
     """Choices for the source of the item."""
 
     TMDB = "tmdb", "The Movie Database"
+    IMDB = "imdb", "The Internet Movie Database"
+    TVDB = "tvdb", "Skyhook (TVDB Mirror)"
     MAL = "mal", "MyAnimeList"
     MANGAUPDATES = "mangaupdates", "MangaUpdates"
     IGDB = "igdb", "Internet Game Database"
