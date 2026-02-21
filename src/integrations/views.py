@@ -118,6 +118,7 @@ def import_trakt_public(request):
 @require_POST
 def plex_connect(request):
     """Initiate Plex authentication via the pin-based flow."""
+    """If PLEX_WATCH enabled, recurring task is created"""
     redirect_uri = request.build_absolute_uri(reverse("plex_callback"))
     state_token = secrets.token_urlsafe(16)
 
@@ -214,13 +215,77 @@ def plex_callback(request):
     )
 
     account_username = account.get("username") or "your Plex account"
-    messages.success(request, f"Connected to Plex as {account_username}.")
+    if not getattr(settings, "PLEX_WATCH_SYNC", False):
+        messages.success(request, f"Connected to Plex as {account_username}.")
+    else:
+        try:
+            from django_celery_beat.models import CrontabSchedule, PeriodicTask
+
+            # Create 2-hour recurring task if it doesn't exist
+            existing_task = PeriodicTask.objects.filter(
+                task="Import from Plex  (Recurring)",
+                kwargs__contains=f'"user_id": {request.user.id}',
+                enabled=True,
+            ).first()
+
+            if not existing_task:
+                crontab, _ = CrontabSchedule.objects.get_or_create(
+                    minute=0,
+                    hour="*/2",
+                    day_of_week="*",
+                    day_of_month="*",
+                    month_of_year="*",
+                    timezone=timezone.get_default_timezone(),
+                )
+
+                task_name = f"Import from Plex for {request.user.username} (every 2 hours)"
+                PeriodicTask.objects.create(
+                    name=task_name,
+                    task="Import from Plex (Recurring)",
+                    crontab=crontab,
+                    kwargs=json.dumps({"user_id": request.user.id}),
+                    start_time=timezone.now(),
+                    enabled=True,
+                )
+
+                crontab, _ = CrontabSchedule.objects.get_or_create(
+                    minute="*/2",
+                    hour="*",
+                    day_of_week="*",
+                    day_of_month="*",
+                    month_of_year="*",
+                    timezone=timezone.get_default_timezone(),
+                )
+
+                task_name = f"Scrobble Plex streams for {request.user.username} (every 2 minutes)"
+                PeriodicTask.objects.create(
+                    name=task_name,
+                    task="Scrobble Plex sessions (Recurring)",
+                    crontab=crontab,
+                    kwargs=json.dumps({"user_id": request.user.id}),
+                    start_time=timezone.now(),
+                    enabled=True,
+                )
+
+            messages.success(request, "Connected to Plex successfully. Initial import queued. Recurring imports will run every 2 hours.")
+        except Exception as e:
+            messages.error(request, f"Failed to connect Plex: {e}")
+
     return redirect("import_data")
 
 
 @require_POST
 def plex_disconnect(request):
     """Remove stored Plex credentials."""
+    from django_celery_beat.models import PeriodicTask
+
+    PeriodicTask.objects.filter(
+        task="Import from Plex (Recurring)",
+        kwargs__contains=f'"user_id": {request.user.id}',
+    ).delete()
+
+    # Clear all credentials (full disconnect)
+    PocketCastsAccount.objects.filter(user=request.user).delete()
     PlexAccount.objects.filter(user=request.user).delete()
     messages.info(request, "Disconnected Plex.")
     return redirect("import_data")
