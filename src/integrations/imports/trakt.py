@@ -391,12 +391,8 @@ class TraktImporter:
         ):
             return
 
-        metadata = self._get_metadata(MediaTypes.MOVIE.value, tmdb_id, movie["title"])
-        if not metadata:
-            return
         item = helpers.get_or_create_item(MediaTypes.MOVIE.value, source.value, source_id, metadata)
 
-        item = self._get_or_create_item(MediaTypes.MOVIE.value, tmdb_id, metadata)
         watched_at = entry["watched_at"]
 
         key = f"{source_id}"
@@ -506,10 +502,6 @@ class TraktImporter:
             )
 
         if not episode_exists:
-            item_identifier = f"{show['title']} S{season_number}E{episode_number}"
-            self.warnings.append(
-                f"{item_identifier}: not found in {Sources.TMDB.label} "
-                f"with ID {tmdb_id}.",
             if not (found_info := helpers.TMDBResolver(trakt_data=entry, trakt_class=self).resolve()):
                 message = f"{show['title']} S{season_number}E{episode_number}: not found in {source.label} with ID {source_id}."
                 self.queue_unresolved_media("trakt", episode.get("ids", {}).get("trakt"), MediaTypes.EPISODE.value, entry, message)
@@ -528,9 +520,6 @@ class TraktImporter:
         watched_at = entry["watched_at"]
 
         # Create or get TV show
-        tv_item = self._get_or_create_item(MediaTypes.TV.value, tmdb_id, tv_metadata)
-        tv_key = f"{tmdb_id}"
-
         tv_item = helpers.get_or_create_item(MediaTypes.TV.value, source.value, source_id, tv_metadata)
         if tv_key not in self.media_instances[MediaTypes.TV.value]:
             tv_obj = app.models.TV(
@@ -582,8 +571,6 @@ class TraktImporter:
             season_number,
             episode_number,
         )
-
-        ep_key = f"{tmdb_id}:{season_number}:{episode_number}"
 
         ep_key = f"{source_id}:{season_number}:{episode_number}"
         episode_obj = app.models.Episode(
