@@ -19,7 +19,7 @@ from django_celery_beat.models import CrontabSchedule, PeriodicTask
 from simple_history.utils import bulk_create_with_history
 
 import app
-from app.models import MediaTypes
+from app.models import MediaTypes, ExternalID, MetadataSources
 from app.providers import tmdb, services
 from integrations.models import UnresolvedImport
 
@@ -559,27 +559,32 @@ def get_or_create_item(
     season_number=None,
     episode_number=None,
 ):
-    item_kwargs = {
-        "media_id": source_id,
-        "source": source_key,
-        "media_type": media_type,
-    }
+    source_enum = MetadataSources(source_key)
+    ext_qs = ExternalID.objects.select_related("item").filter(metadata_source=source_enum, metadata_source_identifier=str(source_id), item__media_type=media_type,)
+    if ext_qs:
+        item = ext_qs.first().item
+    else:
+        item_kwargs = {
+            "media_id": source_id,
+            "source": source_key,
+            "media_type": media_type,
+        }
 
-    if season_number is not None:
-        item_kwargs["season_number"] = season_number
+        if season_number is not None:
+            item_kwargs["season_number"] = season_number
 
-    if episode_number is not None:
-        item_kwargs["episode_number"] = episode_number
+        if episode_number is not None:
+            item_kwargs["episode_number"] = episode_number
 
-    defaults = {
-        "title": metadata["title"],
-        "image": metadata["image"],
-    }
+        defaults = {
+            "title": metadata["title"],
+            "image": metadata["image"],
+        }
 
-    item, _ = app.models.Item.objects.get_or_create(
-        **item_kwargs,
-        defaults=defaults,
-    )
+        item, _ = app.models.Item.objects.get_or_create(
+            **item_kwargs,
+            defaults=defaults,
+        )
 
     return item
 
@@ -640,3 +645,52 @@ def bulk_create_unresolved(unresolved, batch_size=500):
         )
 
     logger.info(f"Finished creating {len(to_create)} new unresolved entries in batches of {batch_size}.")
+
+
+def queue_external_ids(external_ids, ids_dict, item):
+    """Queue ExternalID objects for bulk creation with error handling."""
+    valid_sources = {choice.value for choice in MetadataSources}
+
+    for source_key, source_id in ids_dict.items():
+        try:
+            if source_key not in valid_sources or not source_id:
+                continue
+
+            # Convert source to enum safely
+            source_enum = MetadataSources(source_key)
+
+            external_ids.append(
+                ExternalID(
+                    item=item,
+                    metadata_source=source_enum,
+                    metadata_source_identifier=str(source_id),
+                )
+            )
+        except ValueError:
+            logger.warning(f"Skipping invalid external metadata source '{source_key}' for item {getattr(item, 'id', '<unknown>')}")
+        except Exception as e:
+            logger.error(f"Failed to queue external ID {source_key}:{source_id} for item {getattr(item, 'id', '<unknown>')}: {e}")
+
+
+def bulk_create_external_ids(external_ids, batch_size=1000):
+    """Bulk create ExternalID objects with deduplication."""
+    if not external_ids:
+        return
+
+    # Deduplicate by (item_id, source, source_id)
+    seen = set()
+    unique_external_ids = []
+    for ext in external_ids:
+        key = (ext.item_id, ext.metadata_source.value, ext.metadata_source_identifier)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_external_ids.append(ext)
+
+    retry_on_lock(
+        lambda: ExternalID.objects.bulk_create(
+            unique_external_ids,
+            batch_size=batch_size,
+            ignore_conflicts=True,
+        )
+    )
