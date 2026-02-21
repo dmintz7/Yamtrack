@@ -904,3 +904,5 @@ LOGGING = {
         'level': logging.DEBUG if DEBUG else logging.INFO,
     },
 }
+
+TRAKT_BULK_PAGE_SIZE = config("TRAKT_BULK_PAGE_SIZE", default="1000")
