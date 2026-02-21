@@ -475,7 +475,7 @@ class TraktImporter:
             return
 
         episode_image = self._get_episode_image(episode_number, season_metadata)
-        watched_at = entry["watched_at"]
+        watched_at = entry.get("watched_at")
 
         # Create or get TV show
         tv_item = self._get_or_create_item(MediaTypes.TV.value, tmdb_id, tv_metadata)

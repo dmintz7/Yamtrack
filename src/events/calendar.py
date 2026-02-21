@@ -756,7 +756,7 @@ def get_episode_datetime(episode, season_number, episode_number, tvmaze_map):
         return datetime.fromisoformat(tvmaze_airstamp)
 
     # Fall back to TMDB data (date only)
-    if episode["air_date"]:
+    if episode.get("air_date"):
         try:
             # Handle both string and datetime air dates
             if hasattr(episode["air_date"], "date"):
