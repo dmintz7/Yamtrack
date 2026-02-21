@@ -21,6 +21,7 @@ from simple_history.utils import bulk_create_with_history
 import app
 from app.models import MediaTypes
 from app.providers import tmdb, services
+from integrations.models import UnresolvedImport
 
 logger = logging.getLogger(__name__)
 
@@ -581,3 +582,61 @@ def get_or_create_item(
     )
 
     return item
+
+
+def bulk_create_unresolved(unresolved, batch_size=500):
+    """Bulk create UnresolvedImport objects with deduplication."""
+    if not unresolved:
+        logger.info("No unresolved imports to create, nothing to do.")
+        return
+
+    logger.info(f"Processing {len(unresolved)} unresolved entries...")
+    seen = set()
+    unique_unresolved = []
+    for entry in unresolved:
+        key = (entry.user_id, entry.metadata_source, entry.metadata_source_identifier, entry.media_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_unresolved.append(entry)
+
+    keys_to_check = [
+        (u.user_id, u.metadata_source, u.metadata_source_identifier, u.media_type)
+        for u in unique_unresolved
+    ]
+
+    existing_keys = set(
+        UnresolvedImport.objects.filter(
+            user_id__in={k[0] for k in keys_to_check},
+            metadata_source__in={k[1] for k in keys_to_check},
+            media_type__in={k[3] for k in keys_to_check},
+        ).values_list(
+            "user_id",
+            "metadata_source",
+            "metadata_source_identifier",
+            "media_type",
+        )
+    )
+
+    to_create = []
+    conflicts = []
+
+    for entry in unique_unresolved:
+        key = (entry.user_id, entry.metadata_source, entry.metadata_source_identifier, entry.media_type)
+        if key in existing_keys:
+            conflicts.append(entry)
+        else:
+            to_create.append(entry)
+
+    logger.info(f"Detected {len(conflicts)} conflicts before insert.")
+
+    # Insert non-conflicting entries in bulk
+    if to_create:
+        retry_on_lock(
+            lambda: UnresolvedImport.objects.bulk_create(
+                to_create,
+                batch_size=batch_size,
+            )
+        )
+
+    logger.info(f"Finished creating {len(to_create)} new unresolved entries in batches of {batch_size}.")
