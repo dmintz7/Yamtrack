@@ -340,8 +340,8 @@ class TraktImporter:
         episode_number=None,
     ):
         item_kwargs = {
-            "media_id": tmdb_id,
-            "source": Sources.TMDB.value,
+            "media_id": source_id,
+            "source": source_key,
             "media_type": media_type,
         }
 
@@ -420,10 +420,6 @@ class TraktImporter:
         return settings.IMG_NONE
 
     def process_watched_episode(self, entry):
-        """Process a single episode watch event."""
-        show = entry["show"]
-        tmdb_id = self._get_tmdb_id(show)
-        if not tmdb_id:
         """Process a single episode watch event with source priority."""
         show = entry.get("show")
         episode = entry.get("episode")
@@ -458,10 +454,6 @@ class TraktImporter:
         episode_media_id = episode.get("ids", {}).get(source.value)
         episode_by_id = None
 
-        # Get TV metadata
-        tv_metadata = self._get_metadata(MediaTypes.TV.value, tmdb_id, show["title"])
-        if not tv_metadata:
-            return
         if episode_media_id and tv_metadata.get("related", {}).get("episodes"):
             episode_by_id = next(
                 (ep for ep in tv_metadata["related"]["episodes"]
@@ -485,13 +477,15 @@ class TraktImporter:
                 message = f"{show['title']} S{season_number}: not found in {source.label} with ID {source_id}."
                 return
 
-        # Get Season metadata
-        season_metadata = self._get_metadata(
-            MediaTypes.SEASON.value,
-            tmdb_id,
-            show["title"],
-            season_number,
-        )
+            season_number = found_info["season_number"]
+            episode_number = found_info["episode_number"]
+            season_metadata, season_source, season_source_id = helpers.get_metadata_by_priority(
+                MediaTypes.SEASON.value,
+                show.get("ids", {}),
+                show.get("title"),
+                season_number=season_number,
+            )
+
         if not season_metadata:
             message = f"{show['title']} S{season_number}: not found in {source.label} with ID {source_id}."
             return
