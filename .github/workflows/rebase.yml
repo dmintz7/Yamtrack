@@ -1,50 +1,44 @@
-name: Sync Pristine & Rebase Dev
+name: Rebase latest onto upstream/latest
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *" # every hour, adjust as needed
+    - cron: "0 * * * *"
 
 jobs:
-  sync-rebase:
+  rebase:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: write
+      pull-requests: write
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.WORKFLOW_TOKEN }}
+          ref: latest
 
-      - name: Add upstream
+      - name: Set Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/dannyvfilms/Yamtrack.git || true
-          git fetch upstream
+          git fetch upstream latest
 
-      # 1️⃣ Reset pristine
-      - name: Reset pristine
+      - name: Rebase onto upstream/latest
         run: |
-          git checkout pristine || git checkout -b pristine
-          git reset --hard upstream/latest
-          git clean -fd
-          git push origin pristine --force-with-lease
+          git rebase upstream/latest
 
-      # 2️⃣ Rebase dev onto pristine
-      - name: Rebase dev onto pristine
-        run: |
-          git checkout dev
-          git fetch origin
-          git rebase pristine || echo "Conflict detected — manual resolution needed"
-          git push origin dev-rebase --force-with-lease || echo "Push failed"
-
-      # 3️⃣ Create PR if rebase succeeds
-      - name: Create PR for dev
-        uses: peter-evans/create-pull-request@v5
+      - name: Create Pull Request (if needed)
+        uses: peter-evans/create-pull-request@v8
         with:
-          branch: dev-rebase
-          base: dev
-          title: "Automated rebase: dev → pristine"
-          body: "This PR rebases `dev` on top of latest `pristine`. Resolve conflicts if any."
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: latest
+          branch: upstream-rebase
+          title: "Rebase latest onto upstream/latest"
+          body: "Automated rebase of latest onto upstream/latest."
+          commit-message: "Rebase latest onto upstream/latest"
+          delete-branch: true

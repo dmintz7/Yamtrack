@@ -19,7 +19,7 @@ class Migration(migrations.Migration):
             name='UnresolvedImport',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('metadata_source', models.CharField(max_length=20)),
+                ('metadata_source', models.CharField(choices=[('tmdb', 'The Movie Database'), ('imdb', 'The IMDB Database'), ('tvdb', 'The TVDB Database'), ('trakt', 'Trakt'), ('tv_rage', 'TV Rage'), ('plex', 'Plex')], max_length=20)),
                 ('metadata_source_identifier', models.CharField(max_length=128)),
                 ('media_type', models.CharField(choices=[('tv', 'TV Show'), ('season', 'TV Season'), ('episode', 'Episode'), ('movie', 'Movie'), ('anime', 'Anime'), ('manga', 'Manga'), ('game', 'Game'), ('book', 'Book'), ('comic', 'Comic'), ('boardgame', 'Board Game'), ('music', 'Music'), ('podcast', 'Podcast')], max_length=20)),
                 ('raw_data', models.JSONField(blank=True, null=True)),
