@@ -1,38 +1,9 @@
 services:
   yamtrack:
     container_name: yamtrack
-    # Image defaults to :latest tag (latest commit on the latest branch)
-    # Use :release or :vX.X.X for stable builds tied to a GitHub Release
-    # Use :dev for the development branch
-    image: ghcr.io/dannyvfilms/yamtrack:latest
+    image: dmintz37/yamtrack:latest
+    build: .
     restart: unless-stopped
-    depends_on:
-      - redis
-    environment:
-      - TZ=Europe/Berlin
-      - SECRET=longstring
-      - REDIS_URL=redis://redis:6379
-      - ADMIN_ENABLED=False
-    volumes:
-      - ./db:/yamtrack/db
-    ports:
-      - "8000:8000"
-    networks:
-      - yamtrack-net
+    env_file:
+      - .env
 
-  redis:
-    container_name: yamtrack-redis
-    image: redis:8-alpine
-    restart: unless-stopped
-    volumes:
-      - redis_data:/data
-    networks:
-      - yamtrack-net
-
-volumes:
-  redis_data:
-
-
-networks:
-  yamtrack-net:
-    driver: bridge
