@@ -12,7 +12,7 @@ from django.conf import settings
 from django.utils import timezone
 
 import app
-from app.models import MediaTypes, Sources, Status
+from app.models import MediaTypes, Sources, Status, Movie, Episode
 from app.providers import services
 from app.services.music import prefetch_album_covers
 
