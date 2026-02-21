@@ -1142,9 +1142,10 @@ class User(AbstractUser):
             "audiobookshelf": "Import from Audiobookshelf (Recurring)",
             "pocketcasts": "Import from Pocket Casts (Recurring)",
             "lastfm": "Poll Last.fm for all users",
-        }
+            "unresolved_import": "Process Unresolved Imports",
+		}
 
-        # Reverse mapping to get source from task name
+		# Reverse mapping to get source from task name
         task_to_source = {v: k for k, v in import_tasks.items()}
 
         task_result_filter_text = f"'user_id': {self.id},"

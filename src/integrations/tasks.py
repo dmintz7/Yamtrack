@@ -2115,3 +2115,25 @@ def scheduled_backup_export(user_id, media_types=None, include_lists=True):
     user = User.objects.get(id=user_id)
     filepath = exports.write_backup(user, media_types=media_types, include_lists=include_lists)
     return f"Backup saved to {filepath}"
+  
+@shared_task(name="Process Unresolved Imports")
+def process_unresolved_imports(user_id, username=None):
+    from integrations.imports.helpers import initiate_unresolved_import
+
+    """
+    Celery task to reprocess unresolved media for a user.
+    """
+    User = get_user_model()
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        logger.warning("process_unresolved_imports task: user %s does not exist", user_id)
+        return {"success": 0, "failed": 0}
+
+    # Call the helper function"
+    logger.info("Starting unresolved media reprocessing for user %s", user.username)
+    result, warnings = initiate_unresolved_import(user)
+
+    logger.info(f"Successfully reprocessed {len(result)} records for user %s: success=%s")
+
+    return format_import_message(result, warnings)

@@ -1190,3 +1190,81 @@ def jellyseerr_webhook(request, token):
     processor = jellyseerr_webhooks.JellyseerrWebhookProcessor()
     processor.process_payload(payload, user)
     return HttpResponse(status=200)
+
+
+@require_POST
+def process_unresolved_import(request):
+    """
+    View for queuing reprocessing of unresolved media via Celery.
+    """
+    from integrations import tasks
+    try:
+        tasks.process_unresolved_imports.delay(user_id=request.user.id, username=request.user.username)
+        messages.info(request, "Processing of unresolved imports has been queued.")
+        logger.info("User %s queued unresolved media processing.", request.user.username)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error(
+            "Failed to queue unresolved media processing for user %s: %s",
+            request.user.username,
+            exc,
+        )
+        messages.error(request, f"Failed to queue unresolved imports: {exc}")
+
+    return redirect("import_data")
+
+@require_POST
+def import_plex_sync(request):
+    """
+    Queue a Plex history import for the current user.
+
+    Plex watch-sync always uses mode="new" and runs every 2 hours automatically.
+    First import is "new", subsequent recurring imports are also "new".
+    """
+    plex_account = getattr(request.user, "plex_account", None)
+    if not plex_account:
+        messages.error(request, "Connect Plex before importing.")
+        return redirect("import_data")
+
+    # Refresh from DB to get latest status
+    plex_account.refresh_from_db()
+
+    # Allow sync even if connection is broken - importer will attempt refresh
+
+    # Check if this is the first import (no existing schedule)
+    from django_celery_beat.models import PeriodicTask, CrontabSchedule
+
+    existing_task = PeriodicTask.objects.filter(
+        task="Import from Plex (Recurring)",
+        kwargs__contains=f'"user_id": {request.user.id}',
+        enabled=True,
+    ).first()
+
+    # Always use mode="new" for Plex watch-sync
+    mode = request.POST.get("mode", "new")
+    tasks.import_plex.delay(None, user_id=request.user.id, mode=mode)
+    if not existing_task:
+        # Set up 2-hour recurring schedule
+        crontab, _ = CrontabSchedule.objects.get_or_create(
+            minute=0,
+            hour="*/2",
+            day_of_week="*",
+            day_of_month="*",
+            month_of_year="*",
+            timezone=timezone.get_default_timezone(),
+        )
+
+        task_name = f"Import from Plex for {request.user.username} (every 2 hours)"
+        PeriodicTask.objects.create(
+            name=task_name,
+            task="Import from Plex (Recurring)",
+            crontab=crontab,
+            kwargs=json.dumps({
+                "user_id": request.user.id,
+            }),
+            start_time=timezone.now(),
+            enabled=True,
+        )
+        messages.info(request, "The task to import media from Plex has been queued. Recurring imports will run every 2 hours.")
+    else:
+        messages.info(request, "The task to import media from Plex has been queued.")
+    return redirect("import_data")

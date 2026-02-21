@@ -56,6 +56,17 @@ class Sources(models.TextChoices):
     MANUAL = "manual", "Manual"
 
 
+class MetadataSources(models.TextChoices):
+    """Choices for the metadata sources."""
+
+    TMDB = "tmdb", "The Movie Database"
+    IMDB = "imdb", "The IMDB Database"
+    TVDB = "tvdb", "The TVDB Database"
+    TRAKT = "trakt", "Trakt"
+    TV_RAGE = "tv_rage", "TV Rage"
+    PLEX = "plex", "Plex"
+
+
 class MediaTypes(models.TextChoices):
     """Choices for the media type of the item."""
 
