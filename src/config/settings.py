@@ -884,3 +884,5 @@ LOGIN_REQUIRED_EXEMPT = [
     r"^/list/\d+/rss/?$",  # Public list RSS feeds
     r"^/list/\d+/json/?$",  # Public list JSON exports
 ]
+
+TRAKT_BULK_PAGE_SIZE = config("TRAKT_BULK_PAGE_SIZE", default="1000")
