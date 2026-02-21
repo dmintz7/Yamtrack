@@ -184,6 +184,7 @@ class TraktImporter:
 
         # Track bulk creation lists for each media type
         self.bulk_media = defaultdict(list)
+        self.external_ids = []
         self.unresolved_imports = []
 
         # Track media instances being created
@@ -205,7 +206,9 @@ class TraktImporter:
         helpers.cleanup_existing_media(self.to_delete, self.user)
         helpers.bulk_create_media(self.bulk_media, self.user)
 
+        helpers.bulk_create_external_ids(self.external_ids)
         helpers.bulk_create_unresolved(self.unresolved_imports)
+
         imported_counts = {
             media_type: len(media_list)
             for media_type, media_list in self.bulk_media.items()
@@ -392,6 +395,7 @@ class TraktImporter:
             return
 
         item = helpers.get_or_create_item(MediaTypes.MOVIE.value, source.value, source_id, metadata)
+        helpers.queue_external_ids(self.external_ids, movie.get("ids", {}), item)
 
         watched_at = entry["watched_at"]
 
@@ -521,6 +525,7 @@ class TraktImporter:
 
         # Create or get TV show
         tv_item = helpers.get_or_create_item(MediaTypes.TV.value, source.value, source_id, tv_metadata)
+        helpers.queue_external_ids(self.external_ids, show.get("ids", {}), tv_item)
         if tv_key not in self.media_instances[MediaTypes.TV.value]:
             tv_obj = app.models.TV(
                 item=tv_item,
@@ -573,6 +578,7 @@ class TraktImporter:
         )
 
         ep_key = f"{source_id}:{season_number}:{episode_number}"
+        helpers.queue_external_ids(self.external_ids, episode.get("ids", {}), episode_item)
         episode_obj = app.models.Episode(
             item=episode_item,
             related_season=season_obj,

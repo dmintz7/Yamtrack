@@ -89,6 +89,7 @@ SpecialModels = [
     "ItemStudioCredit",
     "MetadataBackfillState",
     "CollectionEntry",
+    "ExternalID",
     "UnresolvedImport"
 ]
 for model in app_models:
@@ -203,3 +204,13 @@ class UnresolvedImportAdmin(admin.ModelAdmin):
 from integrations.models import UnresolvedImport  # noqa: E402
 
 admin.site.register(UnresolvedImport, UnresolvedImportAdmin)
+
+
+class ExternalIdAdmin(admin.ModelAdmin):
+    list_display = ("item", "metadata_source", "metadata_source_identifier", "created_at")
+    search_fields = ("metadata_source", "metadata_source_identifier")
+    list_filter = ("metadata_source",)
+
+
+from app.models import ExternalID
+admin.site.register(ExternalID, ExternalIdAdmin)
