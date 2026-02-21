@@ -10,6 +10,9 @@ from datetime import UTC, datetime
 
 from django.conf import settings
 from django.utils import timezone
+from django.contrib.contenttypes.models import ContentType
+from django.db import transaction
+from django.db.models import Q
 
 import app
 from app.models import MediaTypes, Sources, Status, Movie, Episode
