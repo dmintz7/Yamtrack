@@ -65,7 +65,7 @@ COLORS = {
 # --- Central Configuration Dictionary ---
 MEDIA_TYPE_CONFIG = {
     MediaTypes.TV.value: {
-        "sources": [Sources.TMDB],
+        "sources": [Sources.TMDB, Sources.TVDB],
         "default_source": Sources.TMDB,
         "sample_query": "Breaking Bad",
         "unicode_icon": "📺",
@@ -78,7 +78,7 @@ MEDIA_TYPE_CONFIG = {
             <polyline points="17 2 12 7 7 2"/>""",
     },
     MediaTypes.SEASON.value: {
-        "sources": [Sources.TMDB],
+        "sources": [Sources.TMDB, Sources.TVDB],
         "default_source": Sources.TMDB,
         "unicode_icon": "📺",
         "verb": ("watch", "watched"),
@@ -92,7 +92,7 @@ MEDIA_TYPE_CONFIG = {
         "unit": ("E", "Episode"),
     },
     MediaTypes.EPISODE.value: {
-        "sources": [Sources.TMDB],
+        "sources": [Sources.TMDB, Sources.TVDB],
         "default_source": Sources.TMDB,
         "unicode_icon": "📺",
         "verb": ("watch", "watched"),
