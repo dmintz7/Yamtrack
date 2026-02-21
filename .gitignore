@@ -20,3 +20,9 @@ db-dev/
 
 # Local dev DB
 db/
+/.idea/.gitignore
+/.idea/misc.xml
+/.idea/inspectionProfiles/profiles_settings.xml
+/.idea/inspectionProfiles/Project_Default.xml
+/.idea/vcs.xml
+/.idea/yamtrack.iml
