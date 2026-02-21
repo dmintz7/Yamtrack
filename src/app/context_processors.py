@@ -14,6 +14,7 @@ def export_vars(request):  # noqa: ARG001
         "TRACK_TIME": settings.TRACK_TIME,
         "FORK_OWNER_NAME": settings.FORK_OWNER_NAME,
         "FORK_OWNER_URL": settings.FORK_OWNER_URL,
+        "PLEX_WATCH_SYNC": settings.PLEX_WATCH_SYNC
     }
 
 

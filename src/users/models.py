@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 from django_celery_beat.models import PeriodicTask
 from django_celery_results.models import TaskResult
@@ -1143,9 +1144,10 @@ class User(AbstractUser):
             "pocketcasts": "Import from Pocket Casts (Recurring)",
             "lastfm": "Poll Last.fm for all users",
             "unresolved_import": "Process Unresolved Imports",
-		}
+			"plex_scrobble": "Scrobble Plex sessions (Recurring)",
+        }
 
-		# Reverse mapping to get source from task name
+        # Reverse mapping to get source from task name
         task_to_source = {v: k for k, v in import_tasks.items()}
 
         task_result_filter_text = f"'user_id': {self.id},"
@@ -1177,16 +1179,27 @@ class User(AbstractUser):
         # Get periodic tasks with their crontab schedules
         # Match both "user_id": X, (with comma) and "user_id": X} (without comma, last field)
         periodic_tasks_filter_text = f'"user_id": {self.id}'
-        periodic_tasks = PeriodicTask.objects.filter(
-            task__in=import_tasks.values(),
-            kwargs__contains=periodic_tasks_filter_text,
-            enabled=True,
-        ).select_related("crontab")
+        task_filter = Q()
+        for task_name in import_tasks.values():
+            task_filter |= Q(task__startswith=task_name)
+
+        periodic_tasks = (
+            PeriodicTask.objects.filter(
+                task_filter,
+                kwargs__contains=periodic_tasks_filter_text,
+                enabled=True,
+            )
+            .select_related("crontab")
+        )
 
         # Build schedules list
         schedules = []
         for periodic_task in periodic_tasks:
-            source = task_to_source.get(periodic_task.task, "unknown")
+            source = "unknown"
+            for prefix, mapped_source in task_to_source.items():
+                if periodic_task.task.startswith(prefix):
+                    source = mapped_source
+                    break
 
             # Skip if source is unknown (task not in our mapping)
             if source == "unknown":

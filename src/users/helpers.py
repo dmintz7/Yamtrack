@@ -93,6 +93,8 @@ def get_next_run_info(periodic_task):
             # Check if it matches "every 2 hours" pattern
             if hour_part == "*/2" and minute_part in ("0", "00"):
                 frequency = "Every 2 hours"
+            elif minute_part == "*/2" and hour_part == "*":
+                frequency = "Every 2 Minutes"
             # Check if it matches "every 3 hours" pattern (for backwards compatibility)
             elif hour_part == "*/3" and minute_part in ("0", "00"):
                 frequency = "Every 3 hours"
