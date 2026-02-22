@@ -22,6 +22,7 @@ from app.providers import (
     openlibrary,
     pocketcasts,
     tmdb,
+    get_tv_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -254,13 +255,13 @@ def get_media_metadata(
             media_type = MediaTypes.TV.value
         return _ensure_title_fields(manual.metadata(media_id, media_type))
 
-    def tmdb_season_metadata():
-        """Return TMDB season metadata or raise a not-found error."""
-        seasons = tmdb.tv_with_seasons(media_id, season_numbers)
+    def tv_season_metadata():
+        """Return TV season metadata or raise a not-found error."""
+        seasons = get_tv_provider(source).tv_with_seasons(media_id, season_numbers)
         season_key = f"season/{season_numbers[0]}"
         if season_key not in seasons:
             raise_not_found_error(
-                Sources.TMDB.value,
+                source,
                 media_id,
                 media_type=f"season {season_numbers[0]}",
             )
@@ -273,10 +274,10 @@ def get_media_metadata(
             if source == Sources.MANGAUPDATES.value
             else mal.manga(media_id)
         ),
-        MediaTypes.TV.value: lambda: tmdb.tv(media_id),
-        "tv_with_seasons": lambda: tmdb.tv_with_seasons(media_id, season_numbers),
-        MediaTypes.SEASON.value: tmdb_season_metadata,
-        MediaTypes.EPISODE.value: lambda: tmdb.episode(
+        MediaTypes.TV.value: lambda: get_tv_provider(source).tv(media_id),
+        "tv_with_seasons": lambda: get_tv_provider(source).tv_with_seasons(media_id, season_numbers),
+        MediaTypes.SEASON.value: tv_season_metadata,
+        MediaTypes.EPISODE.value: lambda: get_tv_provider(source).episode(
             media_id,
             season_numbers[0],
             episode_number,
@@ -338,10 +339,10 @@ def search(media_type, query, page, source=None):
             else mal.search(media_type, query, page)
         ),
         MediaTypes.ANIME.value: lambda: mal.search(media_type, query, page),
-        MediaTypes.TV.value: lambda: tmdb.search(media_type, query, page),
+        MediaTypes.TV.value: lambda: get_tv_provider(source).search(MediaTypes.TV.value, query, page),
         MediaTypes.MOVIE.value: lambda: tmdb.search(media_type, query, page),
-        MediaTypes.SEASON.value: lambda: tmdb.search(MediaTypes.TV.value, query, page),
-        MediaTypes.EPISODE.value: lambda: tmdb.search(MediaTypes.TV.value, query, page),
+        MediaTypes.SEASON.value: lambda: get_tv_provider(source).search(MediaTypes.TV.value, query, page),
+        MediaTypes.EPISODE.value: lambda: get_tv_provider(source).search(MediaTypes.TV.value, query, page),
         MediaTypes.GAME.value: lambda: igdb.search(query, page),
         MediaTypes.BOOK.value: lambda: (
             openlibrary.search(query, page)

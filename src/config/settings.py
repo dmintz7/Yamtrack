@@ -592,6 +592,7 @@ TMDB_API = config(
 )
 TMDB_NSFW = config("TMDB_NSFW", default=False, cast=bool)
 TMDB_LANG = config("TMDB_LANG", default="en")
+TVDB_LANG = config("TVDB_LANG", default="en")
 
 MAL_API = config(
     "MAL_API",
@@ -883,3 +884,29 @@ LOGIN_REQUIRED_EXEMPT = [
     r"^/list/\d+/rss/?$",  # Public list RSS feeds
     r"^/list/\d+/json/?$",  # Public list JSON exports
 ]
+
+
+import logging
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'simple': {
+            'format': '%(asctime)s  -  %(levelname)-8s  -  %(module)s:%(funcName)s:%(lineno)d  -  %(message)s',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': logging.DEBUG if DEBUG else logging.INFO,
+    },
+}
+
+TRAKT_BULK_PAGE_SIZE = config("TRAKT_BULK_PAGE_SIZE", default="1000")
+PLEX_WATCH_SYNC = config("PLEX_WATCH_SYNC", default=False)
+PLEX_HOST = config("PLEX_HOST", default=None)

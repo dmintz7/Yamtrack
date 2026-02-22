@@ -14,6 +14,7 @@ urlpatterns = [
     path("import/plex/callback", views.plex_callback, name="plex_callback"),
     path("import/plex/disconnect", views.plex_disconnect, name="plex_disconnect"),
     path("import/plex", views.import_plex, name="import_plex"),
+    path("import/plex_sync", views.import_plex_sync, name="import_plex_sync"),
     path("import/simkl-oauth", views.simkl_oauth, name="simkl_oauth"),
     path(
         "import/simkl_private",
@@ -48,6 +49,7 @@ urlpatterns = [
     path("import/lastfm/connect", views.lastfm_connect, name="lastfm_connect"),
     path("import/lastfm/disconnect", views.lastfm_disconnect, name="lastfm_disconnect"),
     path("import/lastfm/poll", views.poll_lastfm_manual, name="poll_lastfm_manual"),
+    path("import/unresolved", views.process_unresolved_import, name="process_unresolved"),
     path("export/csv", views.export_csv, name="export_csv"),
     path(
         "webhook/jellyfin/<str:token>",

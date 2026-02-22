@@ -1,0 +1,50 @@
+name: Sync Pristine & Rebase Dev
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *" # every hour, adjust as needed
+
+jobs:
+  sync-rebase:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.WORKFLOW_TOKEN }}
+
+      - name: Add upstream
+        run: |
+          git remote add upstream https://github.com/dannyvfilms/Yamtrack.git || true
+          git fetch upstream
+
+      # 1️⃣ Reset pristine
+      - name: Reset pristine
+        run: |
+          git checkout pristine || git checkout -b pristine
+          git reset --hard upstream/latest
+          git clean -fd
+          git push origin pristine --force-with-lease
+
+      # 2️⃣ Rebase dev onto pristine
+      - name: Rebase dev onto pristine
+        run: |
+          git checkout dev
+          git fetch origin
+          git rebase pristine || echo "Conflict detected — manual resolution needed"
+          git push origin dev-rebase --force-with-lease || echo "Push failed"
+
+      # 3️⃣ Create PR if rebase succeeds
+      - name: Create PR for dev
+        uses: peter-evans/create-pull-request@v5
+        with:
+          branch: dev-rebase
+          base: dev
+          title: "Automated rebase: dev → pristine"
+          body: "This PR rebases `dev` on top of latest `pristine`. Resolve conflicts if any."
