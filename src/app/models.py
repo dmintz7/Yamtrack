@@ -3018,15 +3018,25 @@ class Episode(models.Model):
         # clear prefetch cache to get the updated episodes
         self.related_season.refresh_from_db()
 
-        season_just_completed = False
-        if self.item.episode_number == max_progress:
-            self.related_season.status = Status.COMPLETED.value
-            bulk_update_with_history(
-                [self.related_season],
-                Season,
-                fields=["status"],
-            )
-            season_just_completed = True
+        watched_count = (
+            self.related_season.episodes
+            .values("item__episode_number")
+            .distinct()
+            .count()
+        )
+
+        season_just_completed = (
+                watched_count >= max_progress
+                and self.related_season.status != Status.COMPLETED.value
+        )
+        if watched_count >= max_progress:
+            if self.related_season.status != Status.COMPLETED.value:
+                self.related_season.status = Status.COMPLETED.value
+                bulk_update_with_history(
+                    [self.related_season],
+                    Season,
+                    fields=["status"],
+                )
 
         elif self.related_season.status != Status.IN_PROGRESS.value:
             self.related_season.status = Status.IN_PROGRESS.value
@@ -3042,13 +3052,14 @@ class Episode(models.Model):
             ]
             # mark the TV show as completed if it's the last season
             if season_number == last_season:
-                self.related_season.related_tv.status = Status.COMPLETED.value
-                bulk_update_with_history(
-                    [self.related_season.related_tv],
-                    TV,
-                    fields=["status"],
-                )
-        elif self.related_season.related_tv.status != Status.IN_PROGRESS.value:
+                if self.related_season.related_tv.status != Status.COMPLETED.value:
+                    self.related_season.related_tv.status = Status.COMPLETED.value
+                    bulk_update_with_history(
+                        [self.related_season.related_tv],
+                        TV,
+                        fields=["status"],
+                    )
+        elif self.related_season.related_tv.status not in (Status.IN_PROGRESS.value, Status.COMPLETED.value):
             self.related_season.related_tv.status = Status.IN_PROGRESS.value
             bulk_update_with_history(
                 [self.related_season.related_tv],
