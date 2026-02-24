@@ -1147,7 +1147,7 @@ def media_list(request, media_type):
     media_list = apply_completed_filter(media_list, completed_filter, media_type)
 
     # Handle time_left sorting for TV shows
-    if sort_filter == "time_left" and media_type == MediaTypes.TV.value:
+    if (sort_filter == "time_left" or settings.ALWAYS_SHOW_TIME_LEFT) and media_type == MediaTypes.TV.value:
         # Cache sorted results for 5 minutes to avoid expensive re-sorts
         cache_key = cache_utils.build_time_left_cache_key(
             request.user.id,

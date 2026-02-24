@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from django.conf import settings
+
 from app.models import MediaTypes
 
 TableType = str
@@ -29,11 +31,11 @@ def _show_progress(media_type: str, current_sort: str, _user: Any) -> bool:
 
 
 def _show_episodes_left(media_type: str, current_sort: str, _user: Any) -> bool:
-    return media_type == MediaTypes.TV.value and current_sort == "time_left"
+    return media_type == MediaTypes.TV.value and (current_sort == "time_left" or settings.ALWAYS_SHOW_TIME_LEFT)
 
 
 def _show_time_left(media_type: str, current_sort: str, _user: Any) -> bool:
-    return media_type == MediaTypes.TV.value and current_sort == "time_left"
+    return media_type == MediaTypes.TV.value and (current_sort == "time_left" or settings.ALWAYS_SHOW_TIME_LEFT)
 
 
 def _show_last_watched(media_type: str, current_sort: str, _user: Any) -> bool:
