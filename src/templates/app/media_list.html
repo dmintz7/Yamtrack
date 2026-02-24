@@ -36,13 +36,17 @@
       'all': 'Any',
       'released': 'Released',
       'not_released': 'Not Released'
+    }, completedLabels: {
+      'all': 'All',
+       'true': 'Not Completed',
+       'false': 'Completed'
     }, sortLabels: {
     {% for value, label in sort_choices %}
       '{{ value }}': '{{ label }}'
       {% if not forloop.last %},{% endif %}
 
     {% endfor %}
-    }, defaultDirection(value) { return ['start_date', 'title', 'time_left'].includes(value) ? 'asc' : 'desc' }, toggleSort(value) { this.direction = (this.sort === value) ? (this.direction === 'asc' ? 'desc' : 'asc') : this.defaultDirection(value); this.sort = value; }, toggleRating() { if (this.rating === 'all') { this.rating = 'rated'; } else if (this.rating === 'rated') { this.rating = 'not_rated'; } else { this.rating = 'all'; } }, toggleCollection() { if (this.collection === 'all') { this.collection = 'collected'; } else if (this.collection === 'collected') { this.collection = 'not_collected'; } else { this.collection = 'all'; } }, filterLabel() { const labels = []; if (this.rating && this.rating !== 'all') { labels.push(this.ratingLabels[this.rating] || 'Rated'); } if (this.collection && this.collection !== 'all') { labels.push(this.collectionLabels[this.collection] || 'Collected'); } if (this.genre) { labels.push(this.genre); } if (this.year) { labels.push(this.year === 'unknown' ? 'Unknown Year' : this.year); } if (this.release && this.release !== 'all') { labels.push(this.releaseLabels[this.release] || 'Released'); } if (this.source) { labels.push(this.source.toUpperCase()); } if (this.showLanguages && this.language) { labels.push(this.language.length <= 3 ? this.language.toUpperCase() : this.language); } if (this.showCountries && this.country) { labels.push(this.country.length <= 3 ? this.country.toUpperCase() : this.country); } if (this.showPlatforms && this.platform) { labels.push(this.platform); } if (this.showOrigins && this.origin) { labels.push(this.origin.length <= 3 ? this.origin.toUpperCase() : this.origin); } if (this.showFormats && this.format) { labels.push(this.format === 'ebook' ? 'eBook' : this.format.charAt(0).toUpperCase() + this.format.slice(1)); } if (this.showAuthors && this.author) { labels.push(this.author); } if (labels.length === 0) { return 'All'; } if (labels.length === 1) { return labels[0]; } return `${labels[0]} +${labels.length - 1}`; }, clearFilters() { this.rating = 'all'; this.collection = 'all'; this.genre = ''; this.year = ''; this.release = 'all'; this.source = ''; this.language = ''; this.country = ''; this.platform = ''; this.origin = ''; this.format = ''; this.author = ''; } }">
+    }, defaultDirection(value) { return ['start_date', 'title', 'time_left'].includes(value) ? 'asc' : 'desc' }, toggleSort(value) { this.direction = (this.sort === value) ? (this.direction === 'asc' ? 'desc' : 'asc') : this.defaultDirection(value); this.sort = value; }, toggleRating() { if (this.rating === 'all') { this.rating = 'rated'; } else if (this.rating === 'rated') { this.rating = 'not_rated'; } else { this.rating = 'all'; } }, toggleCollection() { if (this.collection === 'all') { this.collection = 'collected'; } else if (this.collection === 'collected') { this.collection = 'not_collected'; } else { this.collection = 'all'; } }, toggleCompleted() { if (this.completed === 'all') { this.completed = 'false'; } else if (this.completed === 'false') { this.completed = 'true'; } else { this.completed = 'all'; } }, filterLabel() { const labels = []; if (this.rating && this.rating !== 'all') { labels.push(this.ratingLabels[this.rating] || 'Rated'); } if (this.collection && this.collection !== 'all') { labels.push(this.collectionLabels[this.collection] || 'Collected'); } if (this.genre) { labels.push(this.genre); } if (this.year) { labels.push(this.year === 'unknown' ? 'Unknown Year' : this.year); } if (this.release && this.release !== 'all') { labels.push(this.releaseLabels[this.release] || 'Released'); } if (this.completed && this.completed !== 'all') { labels.push(this.completedLabels[this.completed] || 'Not Completed'); } if (this.source) { labels.push(this.source.toUpperCase()); } if (this.showLanguages && this.language) { labels.push(this.language.length <= 3 ? this.language.toUpperCase() : this.language); } if (this.showCountries && this.country) { labels.push(this.country.length <= 3 ? this.country.toUpperCase() : this.country); } if (this.showPlatforms && this.platform) { labels.push(this.platform); } if (this.showOrigins && this.origin) { labels.push(this.origin.length <= 3 ? this.origin.toUpperCase() : this.origin); } if (this.showFormats && this.format) { labels.push(this.format === 'ebook' ? 'eBook' : this.format.charAt(0).toUpperCase() + this.format.slice(1)); } if (this.showAuthors && this.author) { labels.push(this.author); } if (labels.length === 0) { return 'All'; } if (labels.length === 1) { return labels[0]; } return `${labels[0]} +${labels.length - 1}`; }if (labels.length === 0) { return 'All'; } if (labels.length === 1) { return labels[0]; } return `${labels[0]} +${labels.length - 1}`; }, clearFilters() { this.rating = 'all'; this.collection = 'all'; this.genre = ''; this.year = ''; this.release = 'all'; this.source = ''; this.language = ''; this.country = ''; this.platform = ''; this.origin = ''; this.format = ''; this.author = ''; this.completed = 'all';} }">
 
     <!-- Form to manage state -->
     <form id="filter-form" class="hidden">
@@ -61,6 +65,7 @@
       <input type="hidden" name="origin" x-model="origin">
       <input type="hidden" name="format" x-model="format">
       <input type="hidden" name="author" x-model="author">
+      <input type="hidden" name="completed" x-model="completed">
       <input type="hidden" name="search" x-model="search">
       <input type="hidden" name="layout" x-model="layout">
     </form>
@@ -226,6 +231,14 @@
                   <span class="ml-2">{% include "app/icons/chevron-right.svg" with classes="w-3.5 h-3.5" %}</span>
                 </button>
               {% endif %}
+              
+              <button class="flex items-center w-full px-4 py-2 text-left text-sm transition-colors cursor-pointer text-gray-300 hover:bg-[#454d5a] hover:text-white"
+                  @click="view = 'completed'"
+                  type="button">
+                  <span class="flex-shrink-0 mr-3">Watched Status</span>
+                  <span class="ml-auto text-xs text-gray-400 block min-w-0 truncate max-w-[8rem]" x-text="completedLabels[completed] || 'Any'"></span>
+                  <span class="ml-2">{% include "app/icons/chevron-right.svg" with classes="w-3.5 h-3.5" %}</span>
+              </button>
             </div>
 
             <div x-show="view === 'genre'" x-cloak class="p-2">
@@ -779,6 +792,52 @@
                 </template>
               </div>
             </div>
+
+            <div x-show="view === 'completed'" x-cloak class="p-2">
+              <div class="flex items-center gap-2 px-2 py-1">
+                <button class="p-1 rounded hover:bg-[#454d5a] transition-colors cursor-pointer"
+                        @click="view = 'root'"
+                        type="button">
+                  {% include "app/icons/chevron-left.svg" with classes="w-4 h-4" %}
+                </button>
+                <div class="text-xs uppercase tracking-wide text-gray-300">Format</div>
+              </div>
+              <div class="px-2 py-2">
+                <input type="text"
+                       x-model="formatSearch"
+                       placeholder="Filter Format"
+                       class="w-full px-3 py-2 rounded-md bg-[#2a2f35] text-sm text-gray-200 placeholder-gray-500 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+              </div>
+              <div class="max-h-64 overflow-y-auto">
+                <button hx-get="{% url 'medialist' media_type %}"
+                        {% if media_list %} hx-target="{{ layout_class }}" {% else %} hx-target="#empty_list" {% endif %}
+                        hx-include="#filter-form"
+                        hx-indicator="#loading-indicator"
+                        class="flex items-center w-full px-4 py-2 text-left text-sm transition-colors cursor-pointer text-gray-300 hover:bg-[#454d5a] hover:text-white"
+                        @click="format = ''; open = false; view = 'root'"
+                        type="button">
+                  <span>Any Format</span>
+                  <span class="ml-auto" x-show="format === ''">
+                    {% include "app/icons/checkmark.svg" with classes="w-4 h-4 text-green-400" %}
+                  </span>
+                </button>
+                <template x-for="option in filteredFormats()" :key="option.value">
+                  <button hx-get="{% url 'medialist' media_type %}"
+                          {% if media_list %} hx-target="{{ layout_class }}" {% else %} hx-target="#empty_list" {% endif %}
+                          hx-include="#filter-form"
+                          hx-indicator="#loading-indicator"
+                          class="flex items-center w-full px-4 py-2 text-left text-sm transition-colors cursor-pointer text-gray-300 hover:bg-[#454d5a] hover:text-white"
+                          @click="format = option.value; open = false; view = 'root'"
+                          type="button">
+                    <span class="block min-w-0 truncate max-w-[11rem]" x-text="option.label"></span>
+                    <span class="ml-auto" x-show="format === option.value">
+                      {% include "app/icons/checkmark.svg" with classes="w-4 h-4 text-green-400" %}
+                    </span>
+                  </button>
+                </template>
+              </div>
+            </div>
+            
           </div>
         </div>
 

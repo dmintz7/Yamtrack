@@ -585,6 +585,11 @@ def media_list(request, media_type):
     origin_filter = (request.GET.get("origin") or "").strip()
     format_filter = (request.GET.get("format") or "").strip()
     author_filter = (request.GET.get("author") or "").strip()
+
+    completed_filter = request.GET.get("completed")
+    valid_completed_filters = {"all", "true", "false"}
+    if completed_filter not in valid_completed_filters:
+        completed_filter = "all"
     
     search_query = request.GET.get("search", "")
     try:
@@ -644,6 +649,38 @@ def media_list(request, media_type):
                 filtered_items.append(media)
         
         return filtered_items
+
+    def apply_completed_filter(media_items, filter_value, media_type):
+        if filter_value == "all":
+            return media_items
+
+        if media_type not in (MediaTypes.TV.value, MediaTypes.ANIME.value):
+            return media_items
+
+        want_completed = (filter_value == "true")
+
+        filtered = []
+        for media in media_items:
+            max_p = getattr(media, "max_progress", None)
+            prog = getattr(media, "progress", None)
+
+            # Defensive defaults
+            try:
+                max_p = int(max_p) if max_p is not None else 0
+            except (TypeError, ValueError):
+                max_p = 0
+            try:
+                prog = int(prog) if prog is not None else 0
+            except (TypeError, ValueError):
+                prog = 0
+
+            episodes_left = max(max_p - prog, 0)
+
+            is_completed = (episodes_left != 0)  # <- your rule
+            if is_completed == want_completed:
+                filtered.append(media)
+
+        return filtered
 
     def _normalize_filter_value(value):
         return str(value or "").strip().lower()
@@ -1034,6 +1071,7 @@ def media_list(request, media_type):
             "show_origins": False,
             "show_formats": False,
             "show_authors": False,
+            "completed": "all",
         }
 
     # Get media list with filters applied
@@ -1088,6 +1126,7 @@ def media_list(request, media_type):
         MediaTypes.MANGA.value,
         MediaTypes.COMIC.value,
     )
+    filter_data["completed"] = completed_filter
     media_list = apply_rating_filter(media_list, rating_filter)
     media_list = apply_collection_filter(media_list, collection_filter, request.user, media_type)
     media_list = apply_genre_filter(media_list, genre_filter)
@@ -1103,6 +1142,10 @@ def media_list(request, media_type):
         media_list = apply_author_filter(media_list, author_filter)
         media_list = apply_format_filter(media_list, format_filter)
 
+    if media_type in (MediaTypes.TV.value, MediaTypes.ANIME.value):
+        BasicMedia.objects.annotate_max_progress(media_list, media_type)
+    media_list = apply_completed_filter(media_list, completed_filter, media_type)
+
     # Handle time_left sorting for TV shows
     if sort_filter == "time_left" and media_type == MediaTypes.TV.value:
         # Cache sorted results for 5 minutes to avoid expensive re-sorts
@@ -1114,6 +1157,7 @@ def media_list(request, media_type):
             direction,
             rating_filter,
             collection_filter,
+            completed_filter,
             genre_filter,
             year_filter,
             release_filter,
@@ -1197,6 +1241,7 @@ def media_list(request, media_type):
         "current_origin": origin_filter,
         "current_format": format_filter,
         "current_author": author_filter,
+        "current_completed": completed_filter,
         "sort_choices": MediaSortChoices.choices,
         "status_choices": MediaStatusChoices.choices,
         "rating_choices": MEDIA_RATING_CHOICES,
