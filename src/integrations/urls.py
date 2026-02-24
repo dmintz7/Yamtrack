@@ -14,7 +14,6 @@ urlpatterns = [
     path("import/plex/callback", views.plex_callback, name="plex_callback"),
     path("import/plex/disconnect", views.plex_disconnect, name="plex_disconnect"),
     path("import/plex", views.import_plex, name="import_plex"),
-    path("import/plex_sync", views.import_plex_sync, name="import_plex_sync"),
     path("import/simkl-oauth", views.simkl_oauth, name="simkl_oauth"),
     path(
         "import/simkl_private",

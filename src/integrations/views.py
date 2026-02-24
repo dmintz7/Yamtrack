@@ -315,6 +315,19 @@ def import_plex(request):
             request.user.plex_usernames = cleaned_usernames
             request.user.save(update_fields=["plex_usernames"])
 
+    # --- Watch-sync mode (feature flag) ---
+    if getattr(settings, "PLEX_WATCH_SYNC", False):
+        # Optional: refresh status like your original
+        plex_account.refresh_from_db()
+
+        tasks.import_plex.delay(None, user_id=request.user.id, mode=mode)
+        created = _ensure_watch_sync_schedule(request.user)
+        if created:
+            messages.info(request,"Queued Plex sync. Recurring imports will run every 2 hours.",)
+        else:
+            messages.info(request, "Queued Plex sync.")
+        return redirect("import_data")
+
     # Handle "update_collection" mode separately
     if mode == "update_collection":
         if frequency != "once":
@@ -1277,59 +1290,37 @@ def process_unresolved_import(request):
 
     return redirect("import_data")
 
-@require_POST
-def import_plex_sync(request):
+
+def _ensure_watch_sync_schedule(user):
     """
-    Queue a Plex history import for the current user.
-
-    Plex watch-sync always uses mode="new" and runs every 2 hours automatically.
-    First import is "new", subsequent recurring imports are also "new".
+    Ensure a 2-hour recurring django-celery-beat schedule exists for this user.
+    Assumes watch-sync always runs in mode="new".
     """
-    plex_account = getattr(request.user, "plex_account", None)
-    if not plex_account:
-        messages.error(request, "Connect Plex before importing.")
-        return redirect("import_data")
-
-    # Refresh from DB to get latest status
-    plex_account.refresh_from_db()
-
-    # Allow sync even if connection is broken - importer will attempt refresh
-
-    # Check if this is the first import (no existing schedule)
-    from django_celery_beat.models import PeriodicTask, CrontabSchedule
+    from django_celery_beat.models import CrontabSchedule, PeriodicTask
 
     existing_task = PeriodicTask.objects.filter(
         task="Import from Plex (Recurring)",
-        kwargs__contains=f'"user_id": {request.user.id}',
+        kwargs__contains=f'"user_id": {user.id}',
         enabled=True,
     ).first()
+    if existing_task:
+        return False  # already exists
 
-    # Always use mode="new" for Plex watch-sync
-    mode = request.POST.get("mode", "new")
-    tasks.import_plex.delay(None, user_id=request.user.id, mode=mode)
-    if not existing_task:
-        # Set up 2-hour recurring schedule
-        crontab, _ = CrontabSchedule.objects.get_or_create(
-            minute=0,
-            hour="*/2",
-            day_of_week="*",
-            day_of_month="*",
-            month_of_year="*",
-            timezone=timezone.get_default_timezone(),
-        )
+    crontab, _ = CrontabSchedule.objects.get_or_create(
+        minute=0,
+        hour="*/2",
+        day_of_week="*",
+        day_of_month="*",
+        month_of_year="*",
+        timezone=timezone.get_default_timezone(),
+    )
 
-        task_name = f"Import from Plex for {request.user.username} (every 2 hours)"
-        PeriodicTask.objects.create(
-            name=task_name,
-            task="Import from Plex (Recurring)",
-            crontab=crontab,
-            kwargs=json.dumps({
-                "user_id": request.user.id,
-            }),
-            start_time=timezone.now(),
-            enabled=True,
-        )
-        messages.info(request, "The task to import media from Plex has been queued. Recurring imports will run every 2 hours.")
-    else:
-        messages.info(request, "The task to import media from Plex has been queued.")
-    return redirect("import_data")
+    PeriodicTask.objects.create(
+        name=f"Import from Plex for {user.username} (every 2 hours)",
+        task="Import from Plex (Recurring)",
+        crontab=crontab,
+        kwargs=json.dumps({"user_id": user.id}),
+        start_time=timezone.now(),
+        enabled=True,
+    )
+    return True  # created

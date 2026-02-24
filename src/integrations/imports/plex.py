@@ -2063,7 +2063,7 @@ class PlexSessionWatcher(PlexBase):
             )
 
             if not metadata:
-                return None
+                return False, None
 
             item = helpers.get_or_create_item(
                 MediaTypes.MOVIE.value,
@@ -2080,7 +2080,7 @@ class PlexSessionWatcher(PlexBase):
                 if watched_at > recent.end_date:
                     recent.end_date = watched_at
                     recent.save(update_fields=["end_date"])
-                return recent
+                return True, recent
 
             movie_obj = app.models.Movie.objects.create(user=self.user, item=item, end_date=watched_at, status=Status.COMPLETED.value,)
             movie_obj._history_date = watched_at
@@ -2095,7 +2095,7 @@ class PlexSessionWatcher(PlexBase):
             )
 
             if not tv_metadata:
-                return None
+                return False, None
 
             season_number = getattr(record.plex_obj, "parentIndex", 1)
             episode_number = getattr(record.plex_obj, "index", 1)
@@ -2109,14 +2109,14 @@ class PlexSessionWatcher(PlexBase):
             )
 
             if not season_metadata:
-                return None
+                return False, None
 
             episode_exists = any(
                 ep["episode_number"] == episode_number for ep in season_metadata.get("episodes", [])
             )
             if not episode_exists:
                 self.warnings.append(f"Episode S{season_number}E{episode_number} of {getattr(record.plex_obj, 'grandparentTitle', None)} not found")
-                return None
+                return False, None
 
             episode_image = self._get_episode_image(episode_number, season_metadata)
             tv_item = helpers.get_or_create_item(
@@ -2170,14 +2170,14 @@ class PlexSessionWatcher(PlexBase):
                 end_date__gte=one_hour_ago,
             ).first()
 
+            if self.progress < self.threshold:
+                return False, episode_item
+
             if recent:
                 if watched_at > recent.end_date:
                     recent.end_date = watched_at
                     recent.save(update_fields=["end_date"])
-                return recent
-
-            if self.progress < self.threshold:
-                return False, episode_item
+                return True, recent
 
             episode_obj = app.models.Episode.objects.create(
                 item=episode_item,
@@ -2197,7 +2197,7 @@ class PlexSessionWatcher(PlexBase):
 
             return True, episode_obj
 
-        return None
+        return False, None
 
     @staticmethod
     def session_to_plex_payload(session) -> dict:
