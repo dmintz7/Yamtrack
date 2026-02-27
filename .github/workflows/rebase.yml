@@ -1,4 +1,4 @@
-name: Rebase latest onto upstream/latest
+name: Sync upstream and merge into latest (safe conflict PR)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: "0 * * * *"
 
 jobs:
-  rebase:
+  sync-and-pr:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -26,19 +26,58 @@ jobs:
       - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/dannyvfilms/Yamtrack.git || true
-          git fetch upstream latest
+          git fetch --prune upstream latest
+          git fetch --prune origin
 
-      - name: Rebase onto upstream/latest
+      # 1) Always update a bot mirror branch to the newest upstream
+      - name: Update upstream-sync branch (mirror upstream/latest)
         run: |
-          git rebase upstream/latest
+          git checkout -B upstream-sync upstream/latest
+          git push --force origin upstream-sync
 
-      - name: Create Pull Request (if needed)
+      # 2) If there's already an open PR, do NOT touch the merge branch
+      - name: Stop if merge PR already open
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr list --state open --head upstream-merge --base latest --json number --jq 'length')
+          if [ "$count" -gt 0 ]; then
+            echo "Merge PR already open (upstream-merge -> latest). Leaving it alone."
+            exit 0
+          fi
+
+      # 3) Create a fresh merge branch from latest, then merge upstream-sync into it
+      - name: Create/refresh upstream-merge branch
+        run: |
+          git checkout latest
+          git checkout -B upstream-merge
+
+          set +e
+          git merge --no-ff --no-edit upstream-sync
+          code=$?
+          set -e
+
+          if [ "$code" -eq 0 ]; then
+            echo "Merged cleanly."
+          else
+            echo "Conflicts detected; committing conflict markers for PR resolution."
+            git add -A
+            git commit -m "CONFLICT: merge upstream/latest into latest"
+          fi
+
+          git push --force origin upstream-merge
+
+      - name: Create/Update PR upstream-merge -> latest
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           base: latest
-          branch: upstream-rebase
-          title: "Rebase latest onto upstream/latest"
-          body: "Automated rebase of latest onto upstream/latest."
-          commit-message: "Rebase latest onto upstream/latest"
-          delete-branch: true
+          branch: upstream-merge
+          title: "Merge upstream/latest into latest"
+          body: |
+            Automated merge of `upstream/latest` into `latest`.
+
+            - `upstream-sync` mirrors upstream/latest
+            - This PR merges upstream changes into your combined `latest` branch
+            - If conflicts exist, resolve them in this PR and merge
+          delete-branch: false
