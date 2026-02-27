@@ -1,4 +1,4 @@
-name: Sync upstream and merge into latest (safe conflict PR)
+name: Sync upstream and merge into latest
 
 on:
   workflow_dispatch:
@@ -30,9 +30,18 @@ jobs:
           git fetch --prune origin
 
       # 1) Always update a bot mirror branch to the newest upstream
-      - name: Update upstream-sync branch (mirror upstream/latest)
+      - name: Update upstream-sync branch (mirror upstream/latest, preserve fork workflows)
         run: |
           git checkout -B upstream-sync upstream/latest
+
+          # Keep fork workflows to avoid GitHub restriction on pushing workflow changes
+          git checkout origin/latest -- .github/workflows || true
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync upstream/latest (preserve fork workflows)"
+          fi
+
           git push --force origin upstream-sync
 
       # 2) If there's already an open PR, do NOT touch the merge branch
@@ -57,12 +66,22 @@ jobs:
           code=$?
           set -e
 
+          # Belt-and-suspenders: ensure workflows stay from fork latest
+          git checkout origin/latest -- .github/workflows || true
+
           if [ "$code" -eq 0 ]; then
             echo "Merged cleanly."
           else
             echo "Conflicts detected; committing conflict markers for PR resolution."
-            git add -A
-            git commit -m "CONFLICT: merge upstream/latest into latest"
+          fi
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            if [ "$code" -eq 0 ]; then
+              git commit -m "Merge upstream/latest into latest"
+            else
+              git commit -m "CONFLICT: merge upstream/latest into latest"
+            fi
           fi
 
           git push --force origin upstream-merge
@@ -77,7 +96,7 @@ jobs:
           body: |
             Automated merge of `upstream/latest` into `latest`.
 
-            - `upstream-sync` mirrors upstream/latest
+            - `upstream-sync` mirrors upstream/latest (except `.github/workflows`, preserved from fork)
             - This PR merges upstream changes into your combined `latest` branch
             - If conflicts exist, resolve them in this PR and merge
           delete-branch: false
