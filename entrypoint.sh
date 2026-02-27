@@ -2,6 +2,7 @@
 
 set -e
 
+python manage.py makemigrations --merge --noinput
 python manage.py migrate --noinput
 
 PUID=${PUID:-1000}
