@@ -29,17 +29,22 @@ jobs:
           git fetch --prune upstream latest
           git fetch --prune origin
 
-      # 1) Always update a bot mirror branch to the newest upstream
-      - name: Update upstream-sync branch (mirror upstream/latest, preserve fork workflows)
+      # 1) Update upstream-sync to upstream/latest, but NEVER change workflows
+      - name: Update upstream-sync branch
         run: |
           git checkout -B upstream-sync upstream/latest
 
-          # Keep fork workflows to avoid GitHub restriction on pushing workflow changes
-          git checkout origin/latest -- .github/workflows || true
+          # Freeze workflows to avoid GitHub blocking workflow file pushes.
+          # Prefer existing origin/upstream-sync workflows if present, otherwise fork's latest.
+          if git show-ref --verify --quiet refs/remotes/origin/upstream-sync; then
+            git checkout origin/upstream-sync -- .github/workflows || true
+          else
+            git checkout origin/latest -- .github/workflows || true
+          fi
 
           git add -A
           if ! git diff --cached --quiet; then
-            git commit -m "Sync upstream/latest (preserve fork workflows)"
+            git commit -m "Sync upstream/latest (preserve workflows)"
           fi
 
           git push --force origin upstream-sync
@@ -55,7 +60,7 @@ jobs:
             exit 0
           fi
 
-      # 3) Create a fresh merge branch from latest, then merge upstream-sync into it
+      # 3) Create upstream-merge from latest, merge upstream-sync, and keep workflows frozen
       - name: Create/refresh upstream-merge branch
         run: |
           git checkout latest
@@ -66,14 +71,7 @@ jobs:
           code=$?
           set -e
 
-          # Belt-and-suspenders: ensure workflows stay from fork latest
-          git checkout origin/latest -- .github/workflows || true
-
-          if [ "$code" -eq 0 ]; then
-            echo "Merged cleanly."
-          else
-            echo "Conflicts detected; committing conflict markers for PR resolution."
-          fi
+          git checkout origin/upstream-sync -- .github/workflows || true
 
           git add -A
           if ! git diff --cached --quiet; then
@@ -86,6 +84,11 @@ jobs:
 
           git push --force origin upstream-merge
 
+          # Propagate merge result as success/failure
+          if [ "$code" -ne 0 ]; then
+            echo "Merge had conflicts; PR created for manual resolution."
+          fi
+
       - name: Create/Update PR upstream-merge -> latest
         uses: peter-evans/create-pull-request@v8
         with:
@@ -96,7 +99,7 @@ jobs:
           body: |
             Automated merge of `upstream/latest` into `latest`.
 
-            - `upstream-sync` mirrors upstream/latest (except `.github/workflows`, preserved from fork)
-            - This PR merges upstream changes into your combined `latest` branch
-            - If conflicts exist, resolve them in this PR and merge
+            Notes:
+            - `upstream-sync` tracks upstream/latest, but `.github/workflows/` is frozen to avoid GitHub workflow-push restrictions.
+            - If this PR contains conflicts, resolve them here and merge into `latest`.
           delete-branch: false
