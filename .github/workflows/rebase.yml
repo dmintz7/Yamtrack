@@ -1,38 +1,34 @@
 name: Sync upstream into latest
-
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 * * * *"
-
 jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
-
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: latest
 
-      - run: |
+      - name: Configure git
+        run: |
           git config user.name github-actions
           git config user.email github-actions@users.noreply.github.com
           git remote add upstream https://github.com/dannyvfilms/Yamtrack.git || true
           git fetch upstream latest
+          git fetch origin
 
-      # 2) Check if upstream-sync has anything new vs latest
       - name: Check for differences
         id: diff_check
         run: |
-          git fetch origin latest upstream-sync
-          count=$(git rev-list --count origin/latest..origin/upstream-sync)
+          count=$(git rev-list --count origin/latest..upstream/latest)
           echo "diff_count=$count" >> $GITHUB_OUTPUT
 
-      # 3) If nothing new, close any stale PR and exit
       - name: Exit if no changes
         if: steps.diff_check.outputs.diff_count == '0'
         env:
@@ -43,8 +39,7 @@ jobs:
           echo "No upstream changes. Exiting."
           exit 0
 
-      # 4) Close any existing open PR and delete upstream-merge so we start fresh
-      - name: Close stale PR if upstream has new changes
+      - name: Close stale PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -52,13 +47,11 @@ jobs:
             | xargs -I{} gh pr close {} --comment "Superseded by newer upstream changes." || true
           git push origin --delete upstream-merge || true
 
-      # 5) Create upstream-merge from latest, merge upstream-sync, freeze workflows
-      - name: Create upstream-merge branch
+      - name: Create merge branch
         run: |
-          git checkout latest
-          git checkout -B upstream-merge
+          git checkout -B upstream-merge origin/latest
           set +e
-          git merge --no-ff --no-edit upstream-sync
+          git merge --no-ff --no-edit upstream/latest
           code=$?
           set -e
           git rm -r --cached .github/workflows/ || true
@@ -73,18 +66,13 @@ jobs:
             fi
           fi
           git push --force origin upstream-merge
-          [ "$code" -eq 0 ] || { echo "Merge had conflicts."; }
 
-      # 6) Open the PR
-      - name: Create PR upstream-merge -> latest
-        uses: peter-evans/create-pull-request@v8
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          base: latest
-          branch: upstream-merge
-          title: "Merge upstream/latest into latest"
-          body: |
-            Automated merge of `upstream/latest` into `latest`.
-            - `.github/workflows/` is frozen to your fork's version.
-            - If conflicts are present, resolve them here before merging.
-          delete-branch: false
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base latest \
+            --head upstream-merge \
+            --title "Merge upstream/latest into latest" \
+            --body "Automated merge of upstream/latest. Resolve conflicts here if present."
