@@ -1,4 +1,4 @@
-name: Sync upstream and merge into latest
+name: Sync upstream into latest
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: "0 * * * *"
 
 jobs:
-  sync-and-pr:
+  sync:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -18,61 +18,52 @@ jobs:
           fetch-depth: 0
           ref: latest
 
-      - name: Set Git identity
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Fetch upstream
-        run: |
+      - run: |
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
           git remote add upstream https://github.com/dannyvfilms/Yamtrack.git || true
-          git fetch --prune upstream latest
-          git fetch --prune origin
+          git fetch upstream latest
 
-      # 1) Update upstream-sync to upstream/latest, but NEVER change workflows
-      - name: Update upstream-sync branch
+      # 2) Check if upstream-sync has anything new vs latest
+      - name: Check for differences
+        id: diff_check
         run: |
-          git checkout -B upstream-sync upstream/latest
+          git fetch origin latest upstream-sync
+          count=$(git rev-list --count origin/latest..origin/upstream-sync)
+          echo "diff_count=$count" >> $GITHUB_OUTPUT
 
-          # Freeze workflows to avoid GitHub blocking workflow file pushes.
-          # Prefer existing origin/upstream-sync workflows if present, otherwise fork's latest.
-          if git show-ref --verify --quiet refs/remotes/origin/upstream-sync; then
-            git checkout origin/upstream-sync -- .github/workflows || true
-          else
-            git checkout origin/latest -- .github/workflows || true
-          fi
-
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "Sync upstream/latest (preserve workflows)"
-          fi
-
-          git push --force origin upstream-sync
-
-      # 2) If there's already an open PR, do NOT touch the merge branch
-      - name: Stop if merge PR already open
+      # 3) If nothing new, close any stale PR and exit
+      - name: Exit if no changes
+        if: steps.diff_check.outputs.diff_count == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          count=$(gh pr list --state open --head upstream-merge --base latest --json number --jq 'length')
-          if [ "$count" -gt 0 ]; then
-            echo "Merge PR already open (upstream-merge -> latest). Leaving it alone."
-            exit 0
-          fi
+          gh pr list --state open --head upstream-merge --base latest --json number --jq '.[].number' \
+            | xargs -I{} gh pr close {} --comment "Closing: upstream is no longer ahead of latest." || true
+          echo "No upstream changes. Exiting."
+          exit 0
 
-      # 3) Create upstream-merge from latest, merge upstream-sync, and keep workflows frozen
-      - name: Create/refresh upstream-merge branch
+      # 4) Close any existing open PR and delete upstream-merge so we start fresh
+      - name: Close stale PR if upstream has new changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list --state open --head upstream-merge --base latest --json number --jq '.[].number' \
+            | xargs -I{} gh pr close {} --comment "Superseded by newer upstream changes." || true
+          git push origin --delete upstream-merge || true
+
+      # 5) Create upstream-merge from latest, merge upstream-sync, freeze workflows
+      - name: Create upstream-merge branch
         run: |
           git checkout latest
           git checkout -B upstream-merge
-
           set +e
           git merge --no-ff --no-edit upstream-sync
           code=$?
           set -e
-
-          git checkout origin/upstream-sync -- .github/workflows || true
-
+          git rm -r --cached .github/workflows/ || true
+          rm -rf .github/workflows/
+          git checkout origin/latest -- .github/workflows
           git add -A
           if ! git diff --cached --quiet; then
             if [ "$code" -eq 0 ]; then
@@ -81,15 +72,11 @@ jobs:
               git commit -m "CONFLICT: merge upstream/latest into latest"
             fi
           fi
-
           git push --force origin upstream-merge
+          [ "$code" -eq 0 ] || { echo "Merge had conflicts."; }
 
-          # Propagate merge result as success/failure
-          if [ "$code" -ne 0 ]; then
-            echo "Merge had conflicts; PR created for manual resolution."
-          fi
-
-      - name: Create/Update PR upstream-merge -> latest
+      # 6) Open the PR
+      - name: Create PR upstream-merge -> latest
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -98,8 +85,6 @@ jobs:
           title: "Merge upstream/latest into latest"
           body: |
             Automated merge of `upstream/latest` into `latest`.
-
-            Notes:
-            - `upstream-sync` tracks upstream/latest, but `.github/workflows/` is frozen to avoid GitHub workflow-push restrictions.
-            - If this PR contains conflicts, resolve them here and merge into `latest`.
+            - `.github/workflows/` is frozen to your fork's version.
+            - If conflicts are present, resolve them here before merging.
           delete-branch: false
